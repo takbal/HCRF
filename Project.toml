@@ -1,0 +1,9 @@
+name = "HCRF"
+uuid = "24aa81e6-71a0-470c-93e5-9bf404f6bf9b"
+authors = ["Balint Takacs <takbal@gmail.com>"]
+version = "0.0.0"
+
+[deps]
+BenchmarkTools = "6e4b80f9-dd63-53aa-95a3-0cdb28fa8baf"
+JuliaInterpreter = "aa1ae85d-cabe-5617-a682-6adf51b2e16a"
+Revise = "295af30f-e4ad-537b-8983-00126c2a3abe"

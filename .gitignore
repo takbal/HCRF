@@ -1,0 +1,18 @@
+*.log
+
+# eclipse
+.project
+.pydevproject
+
+# PyCharm
+.idea
+
+# vscode
+.vscode
+
+# image loading
+JuliaSysimage.so
+Manifest.toml.sysimage
+Project.toml.sysimage
+using.txt
+compiled.txt
