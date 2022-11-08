@@ -2,9 +2,7 @@ using Test, HCRF, Optim, Random, SparseArrays
 
 Random.seed!(123456)
 
-#---------------------------------------------------
-
-@testset "test_train_regression" begin
+function gen_data()
 
     X = [ [ 1.0 2 ; 5 9 ; 7 3 ],
           [ 6 -2 ; 3 3.0 ],
@@ -13,15 +11,49 @@ Random.seed!(123456)
 
     y = [ 0, 1, 0, 1 ]
 
-    model, result = HCRF.fit!(X, y, num_states = 3)
-    actual = predict(model, X)
+    return X, y
+end
 
-    @test isequal( predict(model, X), y)
+function gen_transitions()
+    return [
+            [1, 1, 2],
+            [2, 1, 2],
+            [1, 2, 2],
+            [2, 2, 2],
+            [1, 2, 1],
+            [2, 2, 1],
+        ]
 end
 
 #---------------------------------------------------
 
-@testset "test_train_regression_sparse" begin
+@testset "test_train" begin
+
+    X, y = gen_data()
+
+    model, result = HCRF.fit!(X, y, num_states = 3; L1_penalty = 0.15, transition_generator = step_transitions)
+
+    @test isequal( predict(model, X), y)
+end
+
+@testset "test_train_unconstrained" begin
+
+    X, y = gen_data()
+
+    model, result = HCRF.fit!(X, y, num_states = 3)
+
+    @test isequal( predict(model, X), y)
+
+    _, hidden = predict_marginals(model, X; calc_hidden = true)
+
+    for h in hidden
+        @test h[1] == 1 && h[end] == 3 && all(h[2:end-1] .== 2)
+    end
+end
+
+#---------------------------------------------------
+
+@testset "test_train_sparse" begin
     X = [
         sparse(1:3, [2; 5; 8], ones(3), 3, 10),
         sparse(1:3, [4; 9; 8], ones(3), 3, 10),
@@ -42,14 +74,8 @@ end
 
 @testset "test_forward_backward" begin
 
-    transitions = [
-            [1, 1, 2],
-            [2, 1, 2],
-            [1, 2, 2],
-            [2, 2, 2],
-            [1, 2, 1],
-            [2, 2, 1],
-        ]
+    transitions = gen_transitions()
+
     transition_parameters = [1., 0, 2, 1, 3, -2]
     x = [ 2. 3 ; 1. 0 ; 0. 2]
     state_parameters = [ -1. 1 ; 0. 2 ;;; 1. -1 ; -2. 3 ]
@@ -85,9 +111,9 @@ end
 
     x_dot_parameters = reshape(x * reshape(state_parameters, n_features, :), n_time_steps, n_states, n_classes)
 
-    forward_table, forward_transition_table, backward_table = HCRF.forward_backward(
-        x_dot_parameters, state_parameters, transition_parameters, transitions
-    )
+    forward_table, _, backward_table = HCRF.forward_backward(
+        x_dot_parameters, state_parameters, transition_parameters, transitions;
+        need_transition_table = false, need_backward_table = true)
 
     @test forward_table ≈ expected_forward_table atol=0.0001
     @test forward_table[end,end,1] ≈ backward_table[1,1,1] atol=0.0001
@@ -129,14 +155,7 @@ end
 
 @testset "test_gradient_small" begin
 
-    transitions = [
-        [1, 1, 2],
-        [2, 1, 2],
-        [1, 2, 2],
-        [2, 2, 2],
-        [1, 2, 1],
-        [2, 2, 1],
-    ]
+    transitions = gen_transitions()
 
     transition_parameters = [1., 0, 2, 1, 3, -2]
     x = [2. 3 -1]
@@ -167,14 +186,7 @@ end
 
 @testset "test_gradient_large_state" begin
 
-    transitions = [
-        [1, 1, 2],
-        [2, 1, 2],
-        [1, 2, 2],
-        [2, 2, 2],
-        [1, 2, 1],
-        [2, 2, 1],
-    ]
+    transitions = gen_transitions()
 
     transition_parameters = [1., 0, 2, 1, 3, -2]
     x = [ 2. 3 -1 ; 1. 4 -2 ; 5. 2 -3 ;  -2. 5  3 ]
@@ -203,14 +215,7 @@ end
 
 @testset "test_gradient_large_transition" begin
 
-    transitions = [
-        [1, 1, 2],
-        [2, 1, 2],
-        [1, 2, 2],
-        [2, 2, 2],
-        [1, 2, 1],
-        [2, 2, 1],
-    ]
+    transitions = gen_transitions()
 
     transition_parameters = [1. -5 20 1 3 -2]
     x = [ 2. 3 -1 ; 1. 4 -2 ; 4. -4 2 ;  3 5  3 ]

@@ -1,3 +1,4 @@
+using Optim
 
 mutable struct HCRFModel
     # parameters used in the fit! that produced this model
@@ -23,8 +24,13 @@ mutable struct HCRFModel
     classes_map::Dict
 end
 
-mutable struct ObjectiveFunc{XT <: AbstractVector, yT <: AbstractVector}
+struct ObjectiveFunc{XT <: AbstractVector, yT <: AbstractVector}
     model::HCRFModel
     X::XT
     y::yT
+end
+
+struct ConvergenceError <: Exception
+    m::HCRFModel
+    result::Optim.OptimizationResults
 end

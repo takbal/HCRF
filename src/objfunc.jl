@@ -68,114 +68,64 @@ function regularize_L2(ll, gradient, c2, parameters)
     return ll
 end
 
-# numerically stable log( exp(x) + exp(y) )
-function logaddexp(x::Number, y::Number)
-    if x == y
-        # infs
-        return x + log(2)
+function forward_backward(x_dot_parameters, state_parameters, transition_parameters, transitions; need_transition_table::Bool, need_backward_table::Bool)
+
+    n_time_steps = size(x_dot_parameters, 1)
+    n_states = size(state_parameters, 2)
+    n_classes = size(state_parameters, 3)
+
+    # all probabilities are in log space
+    # Add extra 1 time step for start state
+    forward_table = fill!( Array{Float64}(undef, n_time_steps + 1, n_states, n_classes), -Inf)
+    forward_table[1, 1, :] .= 0
+
+    if need_transition_table || need_backward_table
+        transition_table = fill!( Array{Float64}(undef, n_time_steps, n_states, n_states, n_classes), -Inf)
     else
-        tmp = x - y
-        if tmp > 0
-            return x + log1p(exp(-tmp))
-        elseif tmp <= 0
-            return y + log1p(exp(tmp))
-        else # nans
-            return tmp
-        end
+        transition_table = nothing
     end
-end
 
-# numerically stable Σ log( exp(x_i) )
-function logsumexp(x::AbstractArray{I}) where {I<:Number}
-    m = maximum(x)
-    r = 0.0
-    for i in eachindex(x)
-        r += exp(x[i] - m)
+    if need_backward_table
+        backward_table = fill!( Array{Float64}(undef, n_time_steps + 1, n_states, n_classes), -Inf)
+        backward_table[n_time_steps + 1, n_states, :] .= 0
+    else
+        backward_table = nothing
     end
-    return log(r) + m
-end
 
-function forward(x_dot_parameters, state_parameters, transition_parameters, transitions)
-
-    n_time_steps = size(x_dot_parameters, 1)
-    n_states = size(state_parameters, 2)
-    n_classes = size(state_parameters, 3)
-
-    # it stores probabilities in log space
-    # Add extra 1 time step for start state
-    forward_table = fill!( Array{Float64}(undef, n_time_steps + 1, n_states, n_classes), -Inf)
-    forward_table[1, 1, :] .= 0
-
-    for t in 2:n_time_steps+1
+    # forward transitions
+    for t in 1:n_time_steps
         for (tridx, tr) in enumerate(transitions)
             class_number = tr[1]
             s0 = tr[2]
             s1 = tr[3]
-            # all this does is ft[t, s1] += ft[t-1, s0] + theta * features[t, s1] (features are in unextended t space)
-            edge_potential = forward_table[t - 1, s0, class_number] + transition_parameters[tridx]
-            forward_table[t, s1, class_number] = logaddexp(
-                forward_table[t, s1, class_number],
-                edge_potential + x_dot_parameters[t - 1, s1, class_number]
-            )
+            # ft[t, s1] += ft[t-1, s0] * ψ(x_t, s1) * ψ(s0, s1) # ft is +1 length
+            edge_potential = forward_table[t, s0, class_number] + transition_parameters[tridx] + x_dot_parameters[t, s1, class_number]
+            forward_table[t+1, s1, class_number] =
+                logaddexp( forward_table[t+1, s1, class_number], edge_potential )
+            if need_transition_table
+                # ftt[t, s0, s1] += ft[t-1, s0] * ψ(x_t, s1) * ψ(s0, s1)
+                transition_table[t, s0, s1, class_number] =
+                    logaddexp( transition_table[t, s0, s1, class_number], edge_potential )
+            end
         end
     end
 
-    return forward_table
-
-end
-
-function forward_backward(x_dot_parameters, state_parameters, transition_parameters, transitions)
-
-    n_time_steps = size(x_dot_parameters, 1)
-    n_states = size(state_parameters, 2)
-    n_classes = size(state_parameters, 3)
-    n_transitions = length(transitions)
-
-    # it stores probabilities in log space
-    # Add extra 1 time step for start state
-    forward_table = fill!( Array{Float64}(undef, n_time_steps + 1, n_states, n_classes), -Inf)
-    forward_table[1, 1, :] .= 0
-
-    forward_transition_table = fill!( Array{Float64}(undef, n_time_steps + 1, n_states, n_states, n_classes), -Inf)
-
-    backward_table = fill!( Array{Float64}(undef, n_time_steps + 1, n_states, n_classes), -Inf)
-    backward_table[n_time_steps + 1, n_states, :] .= 0
-
-    # Compute forward transitions
-    for t in 2:n_time_steps+1
-        for (tridx, tr) in enumerate(transitions)
-            class_number = tr[1]
-            s0 = tr[2]
-            s1 = tr[3]
-            # all this does is ft[t, s1] += ft[t-1, s0] + theta * features[t, s1] (features are in unextended t space)
-            edge_potential = forward_table[t - 1, s0, class_number] + transition_parameters[tridx]
-            forward_table[t, s1, class_number] = logaddexp(
-                forward_table[t, s1, class_number],
-                edge_potential + x_dot_parameters[t - 1, s1, class_number]
-            )
-            # all this does is ftt[t, s0, s1] += ft[t-1, s0] + theta * features[t, s1] (features are in unextended t space)
-            forward_transition_table[t, s0, s1, class_number] = logaddexp(
-                forward_transition_table[t, s0, s1, class_number],
-                edge_potential + x_dot_parameters[t - 1, s1, class_number]
-            )
-        end
-    end
-    # Compute backwards transitions
-    for t in n_time_steps:-1:1
-        for (tridx, tr) in enumerate(transitions)
-            class_number = tr[1]
-            s0 = tr[2]
-            s1 = tr[3]
-            # all this does is bt[t, s0] += bt[t+1, s1] + theta * features[t+1, s1] (features are in unextended t space)
-            edge_potential = backward_table[t + 1, s1, class_number] + x_dot_parameters[t, s1, class_number]
-            backward_table[t, s0, class_number] = logaddexp(
-                backward_table[t, s0, class_number],
-                edge_potential + transition_parameters[tridx]
-            )
+    if need_backward_table
+        # backwards transitions
+        for t in n_time_steps:-1:1
+            for (tridx, tr) in enumerate(transitions)
+                class_number = tr[1]
+                s0 = tr[2]
+                s1 = tr[3]
+                # bt[t-1, s0] += bt[t, s1] * ψ(x_t, s1) * ψ(s0, s1) # bt is +1 length
+                edge_potential = backward_table[t + 1, s1, class_number] + x_dot_parameters[t, s1, class_number] + transition_parameters[tridx]
+                backward_table[t, s0, class_number] =
+                    logaddexp( backward_table[t, s0, class_number], edge_potential )
+            end
         end
     end
 
-    return forward_table, forward_transition_table, backward_table
+    return forward_table, transition_table, backward_table
 
 end
 
@@ -189,48 +139,58 @@ function log_likelihood(x, cy, state_parameters, transition_parameters,
 
     x_dot_parameters = reshape(x * reshape(state_parameters, n_features, :), n_time_steps, n_states, n_classes)
 
-    forward_table, forward_transition_table, backward_table = forward_backward(
+    forward_table, transition_table, backward_table = forward_backward(
         x_dot_parameters,
         state_parameters,
         transition_parameters,
-        transitions
+        transitions;
+        need_transition_table = true,
+        need_backward_table = true
     )
 
     # reset parameter gradients buffers
     fill!(dstate_parameters, 0)
     fill!(dtransition_parameters, 0)
 
+    final_ft = view(forward_table, n_time_steps+1, n_states, :)
+
     # compute Z by rewinding the forward table for all classes
     Z = -Inf
     for c in 1:n_classes
-        Z = logaddexp(Z, forward_table[n_time_steps+1, n_states, c])
+        Z = logaddexp(Z, final_ft[c])
     end
 
     # compute all state parameter gradients
-    for t in 2:n_time_steps+1
+    for t in 1:n_time_steps
         for state in 1:n_states
             for c in 1:n_classes
-                alphabeta = forward_table[t, state, c] + backward_table[t, state, c]
-                weight = exp(alphabeta - forward_table[n_time_steps+1, n_states, c]) * (c == cy) - exp(alphabeta - Z)
+                alphabeta = forward_table[t+1, state, c] + backward_table[t+1, state, c]
+                weight = -exp(alphabeta - Z)
+                if c == cy
+                    weight += exp(alphabeta - final_ft[c])
+                end
                 for feat in 1:n_features
-                    dstate_parameters[feat, state, c] += weight * x[t - 1, feat]
+                    dstate_parameters[feat, state, c] += weight * x[t, feat]
                 end
             end
         end
     end
 
     # compute all transition parameter gradients
-    for t in 2:n_time_steps+1
+    for t in 1:n_time_steps
         for (tridx, tr) in enumerate(transitions)
             c = tr[1]
             s0 = tr[2]
             s1 = tr[3]
-            alphabeta = forward_transition_table[t, s0, s1, c] + backward_table[t, s1, c]
-            weight = exp(alphabeta - forward_table[n_time_steps+1, n_states, c]) * (c == cy) - exp(alphabeta - Z)
+            alphabeta = transition_table[t, s0, s1, c] + backward_table[t+1, s1, c]
+            weight = -exp(alphabeta - Z)
+            if c == cy
+                weight += exp(alphabeta - final_ft[c])
+            end
             dtransition_parameters[tridx] += weight
         end
     end
     
-    return forward_table[n_time_steps + 1, n_states, cy] - Z
+    return final_ft[cy] - Z
 
 end
