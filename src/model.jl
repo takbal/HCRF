@@ -1,58 +1,55 @@
 using Optim
 
 """
-fit!(
-        X::AbstractVector{<:AbstractArray},
-        y::AbstractVector;
+    fit!( X::AbstractVector{<:AbstractArray}, y::AbstractVector;
         observations = nothing,
         num_states::UInt = 3,
         L1_penalty::Float64 = 0.,
         L2_penalty::Float64 = 0.15,
-        transition_generator = step_stransitions,
+        transition_generator = unconstrained_transitions,
         state_parameters_noise = 0.001,
         transition_parameter_noise = 0.001,
         use_L1_clipping = false,
         optimize_parameters...)
 
-Fits a HCRF model to the provided features in X and observed classes in y. Length of X and y must match. y may
-contain arbitrary values, the dictionary is determined from the range of provided samples.
+Fits a HCRF model to the provided features in `X` and observed classes in `y`. Length of `X` and `y` must match. `y` may
+contain any values that can be used as keys in a `Dict`.
 
-Returns the fitted model and the optimization result. May throw ConvergenceError with the model and the partial result
-if the optimization did not converge.
+The `X` vector stores observation sequences. Two formats are accepted:
 
-The X vector stores observation sequences. It can be in two formats:
+1. a vector of arrays, where each array contains feature values in a `#timesteps x #features` matrix.
+2. if the `observations` argument is filled, samples in X are viewed row index lists of that table.
 
-1. a vector of arrays, each array containing feature values in a timesteps x features matrix. Matrices can be of arbitrary
-format until they take matrix multiplication with a full double matrix. Timesteps may differ over sequences, but
-number of features must match over samples.
+Matrices can be of arbitrary format until they accept matrix multiplication with a full double matrix. Timesteps
+may differ but number of features must match over samples. The very first feature is assumed to be a bias
+parameter (constant 1), and it is excluded from the L1/L2 regularization.
 
-2. if the 'observations' argument is filled, samples in X are index lists into rows of that table. In the
-likelihood calculation, probabilities are calculated only once for each row of the table. This can vastly speed-up
-computations if the same observation is used in multiple X samples, but at different t timepoint
-(e.g. overlapping observations).
+If samples are provided via the observation list, probabilities are calculated only once for each possible
+observation. This can speed-up computations in case when they can take a limited set of values (e.g. overlapping).
 
-In all cases, the very first feature is assumed to be a bias parameter (constant 1), and its parameter is
-not included in the L1/L2 regularization.
+# Further arguments:
 
-Arguments:
-    X: the samples in a vector of arrays (see above)
-    y: labels, one for each X
-    observations: if provided, samples in X contain lists that index into the rows of this table
-    num_states: number of hidden states *in addition* to the obligatory start and end states.
-    L1_penalty: L1 penalty multiplier (set to 0 to turn off L1 regularization)
-    L2_penalty: L2 penalty multiplier (set to 0 to turn off L2 regularization)
-    transition_generator: a function that accepts a class alphabet and the number of hidden states, then outputs
+- `num_states`: number of hidden states, *including* the obligatory start and end states
+- `L1_penalty`: L1 penalty multiplier (set to 0 to turn off L1 regularization)
+- `L2_penalty`: L2 penalty multiplier (set to 0 to turn off L2 regularization)
+- `transition_generator`: a function that accepts a class alphabet and the number of hidden states, then outputs
                 a list of all possible transitions between hidden states if conditioned on a class label.
                 The list must contain triplets, where the first element is the class label, then hidden state index from, then to.
                 Each of these transitions is going to have a weight that can be tuned.
-                If not specified, the step_transitions() function is used, that allows sequential change of states.
-                See that for an example generator. The first state is assumed to be the start state before the observations,
-                and the largest state number is assumed to be the very last state. This is without loss of generality, see
-                unconstrained_transitions().
-    state_parameter_noise, transition_parameter_noise: variance for weight initialisation noise
-    use_L1_clipping: if true, use clipping of weights in L1 regularisation (gradient-wise dubious)
+                If not specified, the `unconstrained_transitions()` function is used, that allows arbitrary changes.
+                See also `step_transitions()` for another example generator.
 
-    Any further parameters will be passed to the Optim.optimize() call. If none such, LBFGS() is used.
+- `state_parameter_noise`, `transition_parameter_noise`: variance for weight initialisation noise
+
+- `use_L1_clipping`: if true, use clipping of weights in L1 regularisation (gradient-wise dubious)
+
+Any further arguments not listed above will be passed to the `Optim.optimize()` call. If none such, `LBFGS()` is used.
+
+# Returns:
+
+The fitted model and the optimization result. May throw `ConvergenceError` with the model and the partial result
+if the optimization did not converge.
+
 """
 function fit!(X::AbstractVector{<:AbstractArray}, y::AbstractVector;
               observations = nothing,
@@ -133,11 +130,11 @@ function fit!(X::AbstractVector{<:AbstractArray}, y::AbstractVector;
 end
 
 """
-step_transitions(classes_alphabet::AbstractVector, num_states::Int)
+    step_transitions(classes_alphabet::AbstractVector, num_states::Int)
 
 Generates a transition table that can increase or stay in hidden
 state number at each step, but can jump from the initial state to any, and jump from
-any to the end state. (This is the original pyhcrf version, that looks buggy, as it contains
+any to the end state. (Fixed from the original pyhcrf version that contains
 multiple instances of the same transition.)
 """
 function step_transitions(classes_alphabet::AbstractVector, num_states::Int)
@@ -166,12 +163,16 @@ function step_transitions(classes_alphabet::AbstractVector, num_states::Int)
 end
 
 """
-unconstrained_transitions(classes_alphabet::AbstractVector, num_states::Int)
+    unconstrained_transitions(classes_alphabet::AbstractVector, num_states::Int)
 
 Generates a transition table that allows staying or moving to any non-start and
-non-end hidden state at each step. In contrast to step_transitions(), the state machine
+non-end hidden state at each step.
+
+In contrast to `step_transitions()`, the state machine
 is going to visit the initial state exactly once at the beginning, and visit 
-the end state exactly once as the last. The start state may continue at any intermediate
+the end state exactly once as the last.
+
+The start state may continue at any intermediate
 state, and the end state can be reached from any intermediate state, therefore the intermediate
 states are unconstrained in start and ending.
 """
@@ -195,20 +196,18 @@ function unconstrained_transitions(classes_alphabet::AbstractVector, num_states:
 end
 
 """
-Predict the class for each sample in X.
+    predict(m::HCRFModel, X::AbstractVector{<:AbstractArray}; observations = nothing)
 
-Arguments:
-    m: the fitted model
-    X: a #samples sized vector of #timesteps x #features sized matrices.
-        Contains the samples to predict labels for. Samples must have the same
-        number of features as the samples used for training.
-    observations: if provided, X is assumed to contain list of row indices
-    into this matrix (see fit!()).
+Predict the class by the fitted model in `m` for each sample in `X`.
 
-Returns:
-    A #samples sized vector containing the class
-    label with the highest probability for each sample in X. Use
-    predict_marginals() to access all class probabilities.
+If `observations` is provided, `X` is assumed to contain list of row indices into this matrix (see `fit!()`).
+
+Samples must have the same number of features as the samples used for training.
+
+# Returns:
+
+A `#samples` sized vector containing the class labels with the highest probability
+for each sample in `X`. Use `predict_marginals()` to access more details.
 """
 function predict(m::HCRFModel, X::AbstractVector{<:AbstractArray}; observations = nothing)
     preds, _ = predict_marginals(m, X; observations)
@@ -217,29 +216,24 @@ function predict(m::HCRFModel, X::AbstractVector{<:AbstractArray}; observations 
 end
 
 """
-Estimate all class probabilities for each sample in X, and optionally calculate
-the most probable hidden state sequence (this needs more computing).
+    predict_marginals(m::HCRFModel, X::AbstractVector{<:AbstractArray}; observations = nothing, calc_hidden = false)
 
-The returned estimates for all classes are ordered by the
-label of classes.
+Estimate all class probabilities for each sample in `X`, and optionally calculate
+the most probable hidden state sequence.
 
-Arguments:
-    m: the fitted model
-    X: a #samples sized vector of #timesteps x #features sized matrices.
-        Contains the samples to predict labels for. Samples must have the same
-        number of features as the samples used for training.
-    observations: if provided, X is assumed to contain list of row indices
-    into this matrix (see fit!()).
-    calc_hidden: if true, calculate and return the most likely hidden state sequence
-        in the second return value.
+# Arguments:
 
-Returns:
-    A tuple of:
-      - a #samples sized vector containing dictionaries mapping class labels to the
-        prediction probability for each sample of X
-      - nothing if calc_hidden is false, otherwise the sequence of predicted hidden state
-        labels for each X. It always starts in state 1, and ends in #num_states, but it
-        is going to be only one timestep longer than the original sample (but uses all X data).
+- `m`: the fitted model
+- `X`, `observations`: samples to predict labels for (see `fit!()`).
+- `calc_hidden`: if true, calculate and return the most likely hidden state sequence in the second return value.
+
+# Returns:
+
+1. a `#samples` sized vector containing dictionaries mapping class labels to the 
+    prediction probability for each sample of `X`.
+2. nothing if `calc_hidden` was false, otherwise the sequence of predicted hidden state
+        labels for each `X`. It always starts in state 1, and ends in `#states`, but it
+        is going to be only one timestep longer than the original sample (but uses all `X` data).
 """
 function predict_marginals(m::HCRFModel, X::AbstractVector{<:AbstractArray}; observations = nothing, calc_hidden = false)
 
