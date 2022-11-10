@@ -4,6 +4,7 @@ using Optim
 fit!(
         X::AbstractVector{<:AbstractArray},
         y::AbstractVector;
+        observations = nothing,
         num_states::UInt = 3,
         L1_penalty::Float64 = 0.,
         L2_penalty::Float64 = 0.15,
@@ -19,13 +20,24 @@ contain arbitrary values, the dictionary is determined from the range of provide
 Returns the fitted model and the optimization result. May throw ConvergenceError with the model and the partial result
 if the optimization did not converge.
 
-The X vector stores observation sequences, each containing feature values in a timesteps x features matrix. Timesteps
-may differ over sequences, but number of features must match. The very first feature is assumed to be a bias
-parameter (constant 1), and its parameter is not included in the L1/L2 regularization.
+The X vector stores observation sequences. It can be in two formats:
+
+1. a vector of arrays, each array containing feature values in a timesteps x features matrix. Matrices can be of arbitrary
+format until they take matrix multiplication with a full double matrix. Timesteps may differ over sequences, but
+number of features must match over samples.
+
+2. if the 'observations' argument is filled, samples in X are index lists into rows of that table. In the
+likelihood calculation, probabilities are calculated only once for each row of the table. This can vastly speed-up
+computations if the same observation is used in multiple X samples, but at different t timepoint
+(e.g. overlapping observations).
+
+In all cases, the very first feature is assumed to be a bias parameter (constant 1), and its parameter is
+not included in the L1/L2 regularization.
 
 Arguments:
-    X: the samples in a vector of arrays
+    X: the samples in a vector of arrays (see above)
     y: labels, one for each X
+    observations: if provided, samples in X contain lists that index into the rows of this table
     num_states: number of hidden states *in addition* to the obligatory start and end states.
     L1_penalty: L1 penalty multiplier (set to 0 to turn off L1 regularization)
     L2_penalty: L2 penalty multiplier (set to 0 to turn off L2 regularization)
@@ -43,6 +55,7 @@ Arguments:
     Any further parameters will be passed to the Optim.optimize() call. If none such, LBFGS() is used.
 """
 function fit!(X::AbstractVector{<:AbstractArray}, y::AbstractVector;
+              observations = nothing,
               num_states::Int = 3,
               L1_penalty::Float64 = 0.,
               L2_penalty::Float64 = 0.15,
@@ -60,13 +73,15 @@ function fit!(X::AbstractVector{<:AbstractArray}, y::AbstractVector;
     @assert num_states > 1 "num_states must be larger than 1 (init and end states are needed)"
     @assert length(X) == length(y) "observations and labels do not match in length"
     @assert length(X) > 1 "no observation was provided"
-    num_features = size(first(X),2)
-    @assert num_features > 0 "first observation has no features"
     for i in eachindex(X)
-        @assert size(X[i],1) >0 "empty observations were provided at index $(i)"
+        @assert size(X[i],1) > 0 "empty observations were provided at index $(i)"
     end
-    for i in eachindex(X)[2:end]
-        @assert size(X[i],2) == num_features "observation $i differ in feature size (was $(size(X[i],2)) while first had $num_features)"
+    num_features = isnothing(observations) ? size(first(X),2) : size(observations,2)
+    @assert num_features > 0 "first observation has no features"
+    if isnothing(observations)
+        for i in eachindex(X)[2:end]
+            @assert size(X[i],2) == num_features "observation $i differ in feature size (was $(size(X[i],2)) while first had $num_features)"
+        end
     end
  
     classes = sort(unique(y))
@@ -103,7 +118,7 @@ function fit!(X::AbstractVector{<:AbstractArray}, y::AbstractVector;
               state_parameters, transition_parameters, classes, classes_map)
 
     # function object closure
-    obj = ObjectiveFunc(m, X, y)
+    obj = ObjectiveFunc(m, X, y, observations)
 
     result = optimize( Optim.only_fg!(obj), m.parameters; optimize_parameters...)
 
@@ -187,14 +202,16 @@ Arguments:
     X: a #samples sized vector of #timesteps x #features sized matrices.
         Contains the samples to predict labels for. Samples must have the same
         number of features as the samples used for training.
+    observations: if provided, X is assumed to contain list of row indices
+    into this matrix (see fit!()).
 
 Returns:
     A #samples sized vector containing the class
     label with the highest probability for each sample in X. Use
     predict_marginals() to access all class probabilities.
 """
-function predict(m::HCRFModel, X::AbstractVector{T}) where T <: AbstractArray
-    preds, _ = predict_marginals(m, X)
+function predict(m::HCRFModel, X::AbstractVector{<:AbstractArray}; observations = nothing)
+    preds, _ = predict_marginals(m, X; observations)
     return [ findmax(pred)[2] for pred in preds ]
 
 end
@@ -211,6 +228,8 @@ Arguments:
     X: a #samples sized vector of #timesteps x #features sized matrices.
         Contains the samples to predict labels for. Samples must have the same
         number of features as the samples used for training.
+    observations: if provided, X is assumed to contain list of row indices
+    into this matrix (see fit!()).
     calc_hidden: if true, calculate and return the most likely hidden state sequence
         in the second return value.
 
@@ -222,9 +241,11 @@ Returns:
         labels for each X. It always starts in state 1, and ends in #num_states, but it
         is going to be only one timestep longer than the original sample (but uses all X data).
 """
-function predict_marginals(m::HCRFModel, X::AbstractVector{T}; calc_hidden = false) where T <: AbstractArray
+function predict_marginals(m::HCRFModel, X::AbstractVector{<:AbstractArray}; observations = nothing, calc_hidden = false)
 
     y = []
+
+    n_features, n_states, n_classes = size(m.state_parameters)
 
     if !calc_hidden
         hidden_states = nothing
@@ -232,11 +253,29 @@ function predict_marginals(m::HCRFModel, X::AbstractVector{T}; calc_hidden = fal
         hidden_states = []
     end
 
-    for x in X
-        n_time_steps, n_features = size(x)
-        _, n_states, n_classes = size(m.state_parameters)
-        x_dot_parameters = reshape(x * reshape(m.state_parameters, n_features, :), n_time_steps, n_states, n_classes)
+    # sanity checks
+    @assert length(X) > 1 "no observation was provided"
+    for i in eachindex(X)
+        @assert size(X[i],1) > 0 "empty observations were provided at index $(i)"
+    end
+    if isnothing(observations)
+        for i in eachindex(X)
+            @assert size(X[i],2) == n_features "observation $i differ in feature size (was $(size(X[i],2)) while it was $n_features at learning)"
+        end
+    else
+        @assert size(observations, 2) == n_features "observations differ in feature size ($(size(observations,2)) while it was $n_features at learning)"
 
+        # create cache
+        obs_dot_parameters = observations * reshape(m.state_parameters, n_features, :)
+    end
+
+    for x in X
+        n_time_steps = size(x, 1)
+        if isnothing(observations)
+            x_dot_parameters = reshape(x * reshape(m.state_parameters, n_features, :), n_time_steps, n_states, n_classes)
+        else
+            x_dot_parameters = reshape(view(obs_dot_parameters, x, :), n_time_steps, n_states, n_classes)
+        end
 
         forward_table, transition_table, _ = forward_backward(x_dot_parameters,
                                 m.state_parameters,

@@ -24,10 +24,11 @@ mutable struct HCRFModel
     classes_map::Dict
 end
 
-struct ObjectiveFunc{XT <: AbstractVector, yT <: AbstractVector}
+struct ObjectiveFunc{XT <: AbstractVector{<:AbstractArray}, yT <: AbstractVector}
     model::HCRFModel
     X::XT
     y::yT
+    observations
 end
 
 struct ConvergenceError <: Exception

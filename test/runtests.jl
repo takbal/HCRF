@@ -38,13 +38,17 @@ end
 
 @testset "test_train_unconstrained" begin
 
+    # test alternative feature generation
     X, y = gen_data()
 
-    model, result = HCRF.fit!(X, y, num_states = 3)
+    observations = vcat(X...)
+    X = [ [1;2;3], [4;5], [6], [7;8;9;10] ]
 
-    @test isequal( predict(model, X), y)
+    model, result = HCRF.fit!(X, y; observations, num_states = 3)
 
-    _, hidden = predict_marginals(model, X; calc_hidden = true)
+    @test isequal( predict(model, X; observations), y)
+
+    _, hidden = predict_marginals(model, X; observations, calc_hidden = true)
 
     for h in hidden
         @test h[1] == 1 && h[end] == 3 && all(h[2:end-1] .== 2)

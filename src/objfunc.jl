@@ -1,5 +1,5 @@
 # evaluate the objective function (called by Optim.jl)
-function (obj::ObjectiveFunc)(_, G, x)
+function (obj::ObjectiveFunc)(_, G, parameters)
 
     negll_total = 0.0
 
@@ -7,8 +7,8 @@ function (obj::ObjectiveFunc)(_, G, x)
         fill!(G, 0)
     end
 
-    state_parameters = reshape( view(x, 1:obj.model.state_parameters_count), obj.model.state_parameters_shape ) # features x states x classes sized 3D
-    transition_parameters = view(x, obj.model.state_parameters_count+1:(obj.model.state_parameters_count + length(obj.model.transitions) ) )
+    state_parameters = reshape( view(parameters, 1:obj.model.state_parameters_count), obj.model.state_parameters_shape ) # features x states x classes sized 3D
+    transition_parameters = view(parameters, obj.model.state_parameters_count+1:(obj.model.state_parameters_count + length(obj.model.transitions) ) )
 
     # destination vector to fill (presented by views)
     # consider: filling G directly if log_likelihood can deduct it there (but that makes parallelism hard)
@@ -16,13 +16,32 @@ function (obj::ObjectiveFunc)(_, G, x)
     state_gradient = reshape( view(gradient, 1:obj.model.state_parameters_count), obj.model.state_parameters_shape ) # features x states x classes sized 3D
     transition_gradient = view(gradient, obj.model.state_parameters_count+1:(obj.model.state_parameters_count + length(obj.model.transitions) ) )
 
+    n_features, n_states, n_classes = size(state_parameters)
+
+    if !isnothing(obj.observations)
+        # create observation cache
+        obs_dot_parameters = obj.observations * reshape(state_parameters, n_features, :)
+    end
+
     for (sample, class) in zip(obj.X, obj.y)
-        negll_total -= log_likelihood(sample, obj.model.classes_map[class],
+
+        if isnothing(obj.observations)
+            # plain matrices
+            x = sample
+            x_dot_parameters = nothing            
+        else
+            # observation-indexed vectors
+            x = view(obj.observations, sample, :)
+            x_dot_parameters = reshape( view(obs_dot_parameters, sample, :), size(sample, 1), n_states, n_classes)
+        end
+    
+        negll_total -= log_likelihood(x, obj.model.classes_map[class],
                              state_parameters,
                              transition_parameters,
                              obj.model.transitions,
                              state_gradient,
-                             transition_gradient)
+                             transition_gradient;
+                             x_dot_parameters)
                          
         if !isnothing(G)
             G .-= gradient
@@ -30,7 +49,7 @@ function (obj::ObjectiveFunc)(_, G, x)
     end
   
     # exclude the bias feature from being regularized (this assumes it is the very first one!)
-    parameters_without_bias = copy(x)
+    parameters_without_bias = copy(parameters)
     parameters_without_bias[1] = 0
 
     if obj.model.L1_penalty > 0
@@ -130,14 +149,15 @@ function forward_backward(x_dot_parameters, state_parameters, transition_paramet
 end
 
 function log_likelihood(x, cy, state_parameters, transition_parameters,
-    transitions, dstate_parameters, dtransition_parameters)
+    transitions, state_gradient, transition_gradient; x_dot_parameters = nothing)
 
     n_time_steps = size(x, 1)
-    n_features = size(x, 2)
-    n_states = size(state_parameters, 2)
-    n_classes = size(state_parameters, 3)
+    n_features, n_states, n_classes = size(state_parameters)
 
-    x_dot_parameters = reshape(x * reshape(state_parameters, n_features, :), n_time_steps, n_states, n_classes)
+    if isnothing(x_dot_parameters)
+        # allow providing it from the cache
+        x_dot_parameters = reshape(x * reshape(state_parameters, n_features, :), n_time_steps, n_states, n_classes)
+    end
 
     forward_table, transition_table, backward_table = forward_backward(
         x_dot_parameters,
@@ -149,8 +169,8 @@ function log_likelihood(x, cy, state_parameters, transition_parameters,
     )
 
     # reset parameter gradients buffers
-    fill!(dstate_parameters, 0)
-    fill!(dtransition_parameters, 0)
+    fill!(state_gradient, 0)
+    fill!(transition_gradient, 0)
 
     final_ft = view(forward_table, n_time_steps+1, n_states, :)
 
@@ -170,7 +190,7 @@ function log_likelihood(x, cy, state_parameters, transition_parameters,
                     weight += exp(alphabeta - final_ft[c])
                 end
                 for feat in 1:n_features
-                    dstate_parameters[feat, state, c] += weight * x[t, feat]
+                    state_gradient[feat, state, c] += weight * x[t, feat]
                 end
             end
         end
@@ -187,7 +207,7 @@ function log_likelihood(x, cy, state_parameters, transition_parameters,
             if c == cy
                 weight += exp(alphabeta - final_ft[c])
             end
-            dtransition_parameters[tridx] += weight
+            transition_gradient[tridx] += weight
         end
     end
     
