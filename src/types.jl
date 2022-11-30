@@ -1,5 +1,3 @@
-using Optim
-
 mutable struct HCRFModel
     # parameters used in the fitmodel!() that produced this model
     num_states::UInt
