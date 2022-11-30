@@ -1,5 +1,3 @@
-using Optim
-
 """
     fit!( X::AbstractVector{<:AbstractArray}, y::AbstractVector;
         observations = nothing,
@@ -18,14 +16,14 @@ contain any values that can be used as keys in a `Dict`.
 The `X` vector stores observation sequences. Two formats are accepted:
 
 1. a vector of arrays, where each array contains feature values in a `#timesteps x #features` matrix.
-2. if the `observations` argument is filled, samples in X are viewed row index lists of that table.
+2. if the `observations` argument is filled, samples in X are taken as row index lists into that table.
 
 Matrices can be of arbitrary format until they accept matrix multiplication with a full double matrix. Timesteps
 may differ but number of features must match over samples. The very first feature is assumed to be a bias
-parameter (constant 1), and it is excluded from the L1/L2 regularization.
+parameter (a constant 1), and it is excluded from the L1/L2 regularization.
 
-If samples are provided via the observation list, probabilities are calculated only once for each possible
-observation. This can speed-up computations in case when they can take a limited set of values (e.g. overlapping).
+If samples are provided by the `observations` parameter, probabilities are calculated only once for each possible
+observation. This can speed-up computations in case when they can take a limited set of values (e.g. overlapping sequences).
 
 # Further arguments:
 
@@ -47,8 +45,7 @@ Any further arguments not listed above will be passed to the `Optim.optimize()` 
 
 # Returns:
 
-The fitted model and the optimization result. May throw `ConvergenceError` with the model and the partial result
-if the optimization did not converge.
+The fitted model and the optimization result. It may be partial if convergence is not achieved, when @warn is given.
 
 """
 function fit!(X::AbstractVector{<:AbstractArray}, y::AbstractVector;
@@ -122,7 +119,7 @@ function fit!(X::AbstractVector{<:AbstractArray}, y::AbstractVector;
     copyto!( m.parameters, Optim.minimizer(result) )    
 
     if !Optim.converged(result)
-        throw(ConvergenceError(m, result))
+        @warn "HCRF.fit!() failed to converge"
     end
 
     return m, result

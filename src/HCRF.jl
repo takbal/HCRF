@@ -1,14 +1,16 @@
 module HCRF
 
-include("types.jl")
+    using Optim, LoopVectorization, CUDA
 
-include("util.jl")
+    include("types.jl")
 
-include("objfunc.jl")
+    include("util.jl")
 
-include("model.jl")
+    include("objfunc.jl")
 
-export HCRFModel, fit!, predict, predict_marginals,
-       step_transitions, unconstrained_transitions, ConvergenceError
+    include("model.jl")
+
+    export HCRFModel, fit!, predict, predict_marginals,
+        step_transitions, unconstrained_transitions
 
 end # module

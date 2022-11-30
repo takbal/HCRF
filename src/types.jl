@@ -1,7 +1,7 @@
 using Optim
 
 mutable struct HCRFModel
-    # parameters used in the fit! that produced this model
+    # parameters used in the fitmodel!() that produced this model
     num_states::UInt
     L1_penalty::Float64 # L1 penalty constant used in the fit
     L2_penalty::Float64 # L2 penalty constant used in the fit
@@ -29,9 +29,4 @@ struct ObjectiveFunc{XT <: AbstractVector{<:AbstractArray}, yT <: AbstractVector
     X::XT
     y::yT
     observations
-end
-
-struct ConvergenceError <: Exception
-    m::HCRFModel
-    result::Optim.OptimizationResults
 end
