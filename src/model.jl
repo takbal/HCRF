@@ -1,6 +1,6 @@
 """
     fit!( X::AbstractVector{<:AbstractArray}, y::AbstractVector;
-        observations = nothing,
+        features = nothing,
         num_states::UInt = 3,
         L1_penalty::Float64 = 0.,
         L2_penalty::Float64 = 0.15,
@@ -8,6 +8,7 @@
         state_parameters_noise = 0.001,
         transition_parameter_noise = 0.001,
         use_L1_clipping = false,
+        suppress_warning = false,
         optimize_parameters...)
 
 Fits a HCRF model to the provided features in `X` and observed classes in `y`. Length of `X` and `y` must match. `y` may
@@ -15,15 +16,26 @@ contain any values that can be used as keys in a `Dict`.
 
 The `X` vector stores observation sequences. Two formats are accepted:
 
-1. a vector of arrays, where each array contains feature values in a `#timesteps x #features` matrix.
-2. if the `observations` argument is filled, samples in X are taken as row index lists into that table.
+1. it can be a vector of arrays, where each array contains feature values in a `#features x #timesteps` matrix.
+(It is internally converted into the next format.)
 
-Matrices can be of arbitrary format until they accept matrix multiplication with a full double matrix. Timesteps
-may differ but number of features must match over samples. The very first feature is assumed to be a bias
-parameter (a constant 1), and it is excluded from the L1/L2 regularization.
+2. if the `features` argument is filled, X[i] is considered as a column index list into that table,
+and samples are formed from the columns of that table: `sample_features[i] = features[:, X[i]]`.
 
-If samples are provided by the `observations` parameter, probabilities are calculated only once for each possible
-observation. This can speed-up computations in case when they can take a limited set of values (e.g. overlapping sequences).
+Matrices can be of arbitrary format, until they:
+
+1. can be horizontally concatenated into a matrix,
+2. after concatenation, they accept multiplication with a full double matrix, that result in a full double matrix,
+3. can be indexed by columns.
+
+In particular, sparse feature matrices have a special, faster execution path.
+
+Timesteps may differ, but number of features must match over samples.
+
+The very first feature is assumed to be a bias parameter (a constant 1), and it is excluded from the L1/L2 regularization.
+
+If samples are provided through the `features` parameter, probabilities are calculated only once for each possible
+observation. This can speed-up computations if the samples contain overlapping sequences, and the number of features is very large.
 
 # Further arguments:
 
@@ -41,6 +53,8 @@ observation. This can speed-up computations in case when they can take a limited
 
 - `use_L1_clipping`: if true, use clipping of weights in L1 regularisation (gradient-wise dubious)
 
+- `suppress_warning`: if true, do not print warning message about failed convergence
+
 Any further arguments not listed above will be passed to the `Optim.optimize()` call. If none such, `LBFGS()` is used.
 
 # Returns:
@@ -49,7 +63,7 @@ The fitted model and the optimization result. It may be partial if convergence i
 
 """
 function fit!(X::AbstractVector{<:AbstractArray}, y::AbstractVector;
-              observations = nothing,
+              features = nothing,
               num_states::Int = 3,
               L1_penalty::Float64 = 0.,
               L2_penalty::Float64 = 0.15,
@@ -57,6 +71,7 @@ function fit!(X::AbstractVector{<:AbstractArray}, y::AbstractVector;
               state_parameter_noise = 0.001,
               transition_parameter_noise = 0.001,
               use_L1_clipping = false,
+              suppress_warning = false,
               optimize_parameters...)
 
     if isempty(optimize_parameters)
@@ -65,34 +80,54 @@ function fit!(X::AbstractVector{<:AbstractArray}, y::AbstractVector;
 
     # sanity checks
     @assert num_states > 1 "num_states must be larger than 1 (init and end states are needed)"
-    @assert length(X) == length(y) "observations and labels do not match in length"
+    @assert length(X) == length(y) "samples and labels do not match in length"
     @assert length(X) > 1 "no observation was provided"
     for i in eachindex(X)
-        @assert size(X[i],1) > 0 "empty observations were provided at index $(i)"
+        @assert all(size(X[i]) .> 0) "empty samples were provided at index $(i)"
     end
-    num_features = isnothing(observations) ? size(first(X),2) : size(observations,2)
+    num_features = isnothing(features) ? size(first(X),1) : size(features,1)
     @assert num_features > 0 "first observation has no features"
-    if isnothing(observations)
+    if isnothing(features)
         for i in eachindex(X)[2:end]
-            @assert size(X[i],2) == num_features "observation $i differ in feature size (was $(size(X[i],2)) while first had $num_features)"
+            @assert size(X[i],1) == num_features "sample $i differ in feature size (was $(size(X[i],1)) while first had $num_features)"
+        end
+    else
+        for i in eachindex(X)
+            @assert maximum(X[i]) <= size(features,2) "too large index at sample $i"
+            @assert minimum(X[i]) >= 1 "too small index at sample $i"
         end
     end
- 
+
+    # convert X into features table
+    if isnothing(features)
+        X_temp = Vector{Vector{Int64}}()
+        startidx = 1
+        for idx in eachindex(X)
+            push!(X_temp, startidx:(startidx + size(X[idx],2) - 1) )
+            startidx = startidx + size(X[idx],2)
+        end
+        features = hcat(X...)
+        X = X_temp
+    end
+
+    # process labels
     classes = sort(unique(y))
     num_classes = length(classes)
     classes_map = Dict( cls => i for (i,cls) in enumerate(classes) )
+    y_indexed = [ classes_map[value] for value in y ]
 
+    # process transitions
     transitions = transition_generator( classes, num_states )
 
     # convert labels into indices
-    indexed_transitions = Vector{Vector{Int}}()
+    indexed_transitions = Vector{Vector{Int64}}()
     for t in eachindex(transitions)
         @assert transitions[t][1] in keys(classes_map) "found unknown class in transitions: " transitions[t][1]
         push!(indexed_transitions, [ classes_map[transitions[t][1]], transitions[t][2], transitions[t][3] ] )
     end
 
     num_transitions = length(indexed_transitions)
-    state_parameters_shape = (num_features, num_states, num_classes)
+    state_parameters_shape = (num_states, num_classes, num_features)
     state_parameters_count = prod(state_parameters_shape)
 
     parameters = zeros(state_parameters_count + num_transitions)
@@ -112,13 +147,13 @@ function fit!(X::AbstractVector{<:AbstractArray}, y::AbstractVector;
               state_parameters, transition_parameters, classes, classes_map)
 
     # function object closure
-    obj = ObjectiveFunc(m, X, y, observations)
+    obj = ObjectiveFunc(m, X, y_indexed, features)
 
     result = optimize( Optim.only_fg!(obj), m.parameters; optimize_parameters...)
 
     copyto!( m.parameters, Optim.minimizer(result) )    
 
-    if !Optim.converged(result)
+    if !suppress_warning && !Optim.converged(result)
         @warn "HCRF.fit!() failed to converge"
     end
 
@@ -193,11 +228,11 @@ function unconstrained_transitions(classes_alphabet::AbstractVector, num_states:
 end
 
 """
-    predict(m::HCRFModel, X::AbstractVector{<:AbstractArray}; observations = nothing)
+    predict(m::HCRFModel, X::AbstractVector{<:AbstractArray}; features = nothing)
 
 Predict the class by the fitted model in `m` for each sample in `X`.
 
-If `observations` is provided, `X` is assumed to contain list of row indices into this matrix (see `fit!()`).
+If `features` is provided, `X` is assumed to contain list of row indices into this matrix (see `fit!()`).
 
 Samples must have the same number of features as the samples used for training.
 
@@ -206,14 +241,14 @@ Samples must have the same number of features as the samples used for training.
 A `#samples` sized vector containing the class labels with the highest probability
 for each sample in `X`. Use `predict_marginals()` to access more details.
 """
-function predict(m::HCRFModel, X::AbstractVector{<:AbstractArray}; observations = nothing)
-    preds, _ = predict_marginals(m, X; observations)
+function predict(m::HCRFModel, X::AbstractVector{<:AbstractArray}; features = nothing)
+    preds, _ = predict_marginals(m, X; features)
     return [ findmax(pred)[2] for pred in preds ]
 
 end
 
 """
-    predict_marginals(m::HCRFModel, X::AbstractVector{<:AbstractArray}; observations = nothing, calc_hidden = false)
+    predict_marginals(m::HCRFModel, X::AbstractVector{<:AbstractArray}; features = nothing, calc_hidden = false)
 
 Estimate all class probabilities for each sample in `X`, and optionally calculate
 the most probable hidden state sequence.
@@ -221,7 +256,7 @@ the most probable hidden state sequence.
 # Arguments:
 
 - `m`: the fitted model
-- `X`, `observations`: samples to predict labels for (see `fit!()`).
+- `X`, `features`: samples to predict labels for (see `fit!()`).
 - `calc_hidden`: if true, calculate and return the most likely hidden state sequence in the second return value.
 
 # Returns:
@@ -232,11 +267,11 @@ the most probable hidden state sequence.
         labels for each `X`. It always starts in state 1, and ends in `#states`, but it
         is going to be only one timestep longer than the original sample (but uses all `X` data).
 """
-function predict_marginals(m::HCRFModel, X::AbstractVector{<:AbstractArray}; observations = nothing, calc_hidden = false)
+function predict_marginals(m::HCRFModel, X::AbstractVector{<:AbstractArray}; features = nothing, calc_hidden = false)
 
     y = []
 
-    n_features, n_states, n_classes = size(m.state_parameters)
+    n_states, n_classes, n_features = size(m.state_parameters)
 
     if !calc_hidden
         hidden_states = nothing
@@ -247,33 +282,41 @@ function predict_marginals(m::HCRFModel, X::AbstractVector{<:AbstractArray}; obs
     # sanity checks
     @assert length(X) > 1 "no observation was provided"
     for i in eachindex(X)
-        @assert size(X[i],1) > 0 "empty observations were provided at index $(i)"
+        @assert all(size(X[i]) .> 0) "empty sample was provided at index $(i)"
     end
-    if isnothing(observations)
+
+    if isnothing(features)
         for i in eachindex(X)
-            @assert size(X[i],2) == n_features "observation $i differ in feature size (was $(size(X[i],2)) while it was $n_features at learning)"
+            @assert size(X[i],1) == n_features "sample $i differ in feature size (was $(size(X[i],1)) while it was $n_features at learning)"
         end
     else
-        @assert size(observations, 2) == n_features "observations differ in feature size ($(size(observations,2)) while it was $n_features at learning)"
+        @assert size(features, 1) == n_features "features differ in size ($(size(features,1)) while it was $n_features at learning)"
+        for i in eachindex(X)
+            @assert maximum(X[i]) <= size(features,2) "too large feature index at sample $i"
+            @assert minimum(X[i]) >= 1 "too small index at sample $i"
+        end
 
         # create cache
-        obs_dot_parameters = observations * reshape(m.state_parameters, n_features, :)
+        obs_dot_parameters = reshape(m.state_parameters, :, n_features) * features
     end
 
     for x in X
-        n_time_steps = size(x, 1)
-        if isnothing(observations)
-            x_dot_parameters = reshape(x * reshape(m.state_parameters, n_features, :), n_time_steps, n_states, n_classes)
+        if isnothing(features)
+            x_dot_parameters = reshape(reshape(m.state_parameters, :, n_features) * x,  n_states, n_classes, :)
         else
-            x_dot_parameters = reshape(view(obs_dot_parameters, x, :), n_time_steps, n_states, n_classes)
+            x_dot_parameters = reshape(view(obs_dot_parameters, :, x), n_states, n_classes, :)
         end
+        n_time_steps = size(x_dot_parameters, 3)
 
-        forward_table, transition_table, _ = forward_backward(x_dot_parameters,
-                                m.state_parameters,
-                                m.transition_parameters,
-                                m.transitions;
-                                need_transition_table = calc_hidden,
-                                need_backward_table = false)
+        forward_table = Array{Float64}(undef, n_time_steps + 1, n_states, n_classes)
+        if calc_hidden
+            transition_table = Array{Float64}(undef, n_time_steps, n_states, n_states, n_classes)
+            forward!(forward_table, transition_table, x_dot_parameters,
+                     m.transition_parameters, m.transitions; need_transition_table = true)
+        else        
+            forward!(forward_table, nothing, x_dot_parameters,
+                     m.transition_parameters, m.transitions; need_transition_table = false)
+        end
         
         norm_preds = exp.( forward_table[end, end, :] .- logsumexp(forward_table[end, end, :]) )
 

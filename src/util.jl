@@ -1,5 +1,5 @@
 # numerically stable log( exp(x) + exp(y) )
-function logaddexp(x::Number, y::Number)
+@inline @fastmath function logaddexp(x::Number, y::Number)
     if x == y
         # infs
         return x + log(2)
@@ -16,7 +16,7 @@ function logaddexp(x::Number, y::Number)
 end
 
 # numerically stable Σ log( exp(x_i) )
-function logsumexp(x::AbstractArray{I}) where {I<:Number}
+@inline @fastmath function logsumexp(x::AbstractArray{I}) where {I<:Number}
     m = maximum(x)
     r = 0.0
     for i in eachindex(x)

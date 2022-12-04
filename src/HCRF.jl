@@ -1,6 +1,6 @@
 module HCRF
 
-    using Optim, LoopVectorization, CUDA
+    using Optim, SparseArrays
 
     include("types.jl")
 

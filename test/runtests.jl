@@ -4,10 +4,14 @@ Random.seed!(123456)
 
 function gen_data()
 
-    X = [ [ 1.0 2 ; 5 9 ; 7 3 ],
-          [ 6 -2 ; 3 3.0 ],
-          [ 1 -1.0 ],
-          [ 1 1 ; 5 3 ; 4 2 ; 3.0 3 ] ]
+    X = [ [ 1. 5. 7.
+            2. 9. 3. ],
+          [  6. 3.
+            -2. 3. ],
+          [ 1.
+           -1. ],
+          [ 1. 5. 4. 3.
+            1. 3. 2. 3. ] ]
 
     y = [ 0, 1, 0, 1 ]
 
@@ -23,6 +27,36 @@ function gen_transitions()
             [1, 2, 1],
             [2, 2, 1],
         ]
+end
+
+function get_x_dot_parameters(x, state_parameters)
+    n_states, n_classes, n_features = size(state_parameters)
+    return reshape(reshape(state_parameters, :, n_features) * x, n_states, n_classes, size(x,2))
+end
+
+function forward_backward(x_dot_parameters, transition_parameters, transitions)
+
+    (n_states, n_classes, n_time_steps) = size(x_dot_parameters)
+
+    forward_table = Array{Float64}(undef, n_time_steps + 1, n_states, n_classes)
+    transition_table = Array{Float64}(undef, n_time_steps, n_states, n_states, n_classes)
+    backward_table = Array{Float64}(undef, n_time_steps + 1, n_states, n_classes)
+
+    HCRF.forward!(forward_table, transition_table, x_dot_parameters, transition_parameters, transitions; need_transition_table = true)
+    HCRF.backward!(backward_table, x_dot_parameters, transition_parameters, transitions)
+
+    return forward_table, transition_table, backward_table
+
+end
+
+function ll(x, y, state_parameters, transition_parameters, transitions, state_gradient, transition_gradient)
+
+    forward_table, transition_table, backward_table = forward_backward(
+        get_x_dot_parameters(x, state_parameters), transition_parameters, transitions)
+
+    return HCRF.log_likelihood!(state_gradient, transition_gradient, x, y, transitions,
+        forward_table, transition_table, backward_table)
+
 end
 
 #---------------------------------------------------
@@ -41,14 +75,14 @@ end
     # test alternative feature generation
     X, y = gen_data()
 
-    observations = vcat(X...)
+    features = hcat(X...)
     X = [ [1;2;3], [4;5], [6], [7;8;9;10] ]
 
-    model, result = HCRF.fit!(X, y; observations, num_states = 3)
+    model, result = HCRF.fit!(X, y; features, num_states = 3)
 
-    @test isequal( predict(model, X; observations), y)
+    @test isequal( predict(model, X; features), y)
 
-    _, hidden = predict_marginals(model, X; observations, calc_hidden = true)
+    _, hidden = predict_marginals(model, X; features, calc_hidden = true)
 
     for h in hidden
         @test h[1] == 1 && h[end] == 3 && all(h[2:end-1] .== 2)
@@ -59,10 +93,10 @@ end
 
 @testset "test_train_sparse" begin
     X = [
-        sparse(1:3, [2; 5; 8], ones(3), 3, 10),
-        sparse(1:3, [4; 9; 8], ones(3), 3, 10),
-        sparse([1], [4], ones(1), 1, 10),
-        sparse(1:4, [2; 5; 8; 10], ones(4), 4, 10),
+        sparse([2; 5; 8], 1:3, ones(3), 10, 3),
+        sparse([4; 9; 8], 1:3, ones(3), 10, 3),
+        sparse([4], [1], ones(1), 10, 1),
+        sparse([2; 5; 8; 10], 1:4, ones(4), 10, 4),
     ]
 
     y = [ 1, 1, 0, 1 ]
@@ -81,8 +115,8 @@ end
     transitions = gen_transitions()
 
     transition_parameters = [1., 0, 2, 1, 3, -2]
-    x = [ 2. 3 ; 1. 0 ; 0. 2]
-    state_parameters = [ -1. 1 ; 0. 2 ;;; 1. -1 ; -2. 3 ]
+    x = [ 2. 1  0 ; 3  0  2 ]
+    state_parameters = [ -1. 1 ; 1. -1 ;;; 0. -2 ; 2. 3 ]
 
     A = zeros(4, 2, 2)
 
@@ -113,11 +147,8 @@ end
     n_states = 2
     n_classes = 2
 
-    x_dot_parameters = reshape(x * reshape(state_parameters, n_features, :), n_time_steps, n_states, n_classes)
-
-    forward_table, _, backward_table = HCRF.forward_backward(
-        x_dot_parameters, state_parameters, transition_parameters, transitions;
-        need_transition_table = false, need_backward_table = true)
+    forward_table, _, backward_table = forward_backward(
+        get_x_dot_parameters(x, state_parameters), transition_parameters, transitions)
 
     @test forward_table ≈ expected_forward_table atol=0.0001
     @test forward_table[end,end,1] ≈ backward_table[1,1,1] atol=0.0001
@@ -131,8 +162,8 @@ end
 
     transitions = [ [1, 1, 1], [2, 1, 1] ]
     transition_parameters =[1. ; 0]
-    x = [2. 3 -1]
-    state_parameters = [ -1. ; 5 ; 2 ;;; 2 ; -6 ; 13 ]
+    x = [2. ; 3 ; -1]
+    state_parameters = [ -1. 2 ;;; 5 -6 ;;; 2 13 ]
     cy = 2
 
     delta = 5.0 ^ -5
@@ -144,9 +175,9 @@ end
 
         tpd = fill!(similar(transition_parameters), 0.0)
         tpd[trans] = delta
-        ll0 = HCRF.log_likelihood(x, cy, state_parameters, transition_parameters, transitions, dstate_gradient, dtransition_gradient)
+        ll0 = ll(x, cy, state_parameters, transition_parameters, transitions, dstate_gradient, dtransition_gradient)
         dtp0 = dtransition_gradient
-        ll1 = HCRF.log_likelihood(x, cy, state_parameters, transition_parameters + tpd, transitions, dstate_gradient, dtransition_gradient)
+        ll1 = ll(x, cy, state_parameters, transition_parameters + tpd, transitions, dstate_gradient, dtransition_gradient)
         expected_der = (ll1 - ll0) / delta
         actual_der = dtp0[trans]
 
@@ -162,11 +193,13 @@ end
     transitions = gen_transitions()
 
     transition_parameters = [1., 0, 2, 1, 3, -2]
-    x = [2. 3 -1]
-    state_parameters = [ -1. 3 ; 5 7 ; -3 2 ;;; 2. -4 ; -6 8 ; 6 13 ]
+    x = [2. ; 3 ; -1]
+    state_parameters = [ -1. 2 ; 3 -4 ;;; 5 -6 ; 7 8 ;;; -3 6 ; 2 13 ]
     cy = 2
 
     delta = 5.0 ^ -5
+
+    x_dot_parameters = get_x_dot_parameters(x, state_parameters)
 
     dstate_gradient = similar(state_parameters)
     dtransition_gradient = similar(transition_parameters)
@@ -175,9 +208,9 @@ end
 
         tpd = fill!(similar(transition_parameters), 0.0)
         tpd[trans] = delta
-        ll0 = HCRF.log_likelihood(x, cy, state_parameters, transition_parameters, transitions, dstate_gradient, dtransition_gradient)
+        ll0 = ll(x, cy, state_parameters, transition_parameters, transitions, dstate_gradient, dtransition_gradient)
         dtp0 = copy(dtransition_gradient)
-        ll1 = HCRF.log_likelihood(x, cy, state_parameters, transition_parameters + tpd, transitions, dstate_gradient, dtransition_gradient)
+        ll1 = ll(x, cy, state_parameters, transition_parameters + tpd, transitions, dstate_gradient, dtransition_gradient)
         expected_der = (ll1 - ll0) / delta
         actual_der = dtp0[trans]
 
@@ -193,8 +226,8 @@ end
     transitions = gen_transitions()
 
     transition_parameters = [1., 0, 2, 1, 3, -2]
-    x = [ 2. 3 -1 ; 1. 4 -2 ; 5. 2 -3 ;  -2. 5  3 ]
-    state_parameters = [ -1. 3 ; 5 7 ; -3 2 ;;; 2. -4 ; -6 8 ; 6 13 ]
+    x = [ 2. 1 5 -2 ; 3 4 2 5 ; -1 -2 -3 3 ]
+    state_parameters = [ -1. 2 ; 3 -4 ;;; 5 -6 ; 7 8 ;;; -3 6 ; 2 13 ]
     cy = 2
     delta = 5.0 ^ -4
 
@@ -205,9 +238,9 @@ end
 
         spd = fill!(similar(state_parameters), 0.0)
         spd[idx] = delta
-        ll0 = HCRF.log_likelihood(x, cy, state_parameters, transition_parameters, transitions, dstate_gradient, dtransition_gradient)
+        ll0 = ll(x, cy, state_parameters, transition_parameters, transitions, dstate_gradient, dtransition_gradient)
         dsp0 = copy(dstate_gradient)
-        ll1 = HCRF.log_likelihood(x, cy, state_parameters + spd, transition_parameters, transitions, dstate_gradient, dtransition_gradient)
+        ll1 = ll(x, cy, state_parameters + spd, transition_parameters, transitions, dstate_gradient, dtransition_gradient)
         expected_der = (ll1 - ll0) / delta
         actual_der = dsp0[idx]
 
@@ -221,11 +254,13 @@ end
 
     transitions = gen_transitions()
 
-    transition_parameters = [1. -5 20 1 3 -2]
-    x = [ 2. 3 -1 ; 1. 4 -2 ; 4. -4 2 ;  3 5  3 ]
-    state_parameters = [ -1. 3 ; 5 7 ; -3 2 ;;; 2. -4 ; -6 8 ; 6 13 ]
+    transition_parameters = [1., -5, 20, 1, 3, -2]
+    x = [ 2. 1 4 3 ; 3 4 -4 5 ; -1 -2 2 3 ]
+    state_parameters = [ -1. 2 ; 3 -4 ;;; 5 -6 ; 7 8 ;;; -3 6 ; 2 13 ]
     cy = 2
     delta = 5.0 ^ -5
+
+    x_dot_parameters = get_x_dot_parameters(x, state_parameters)
 
     dstate_gradient = similar(state_parameters)
     dtransition_gradient = similar(transition_parameters)
@@ -234,9 +269,9 @@ end
 
         tpd = fill!(similar(transition_parameters), 0.0)
         tpd[trans] = delta
-        ll0 = HCRF.log_likelihood(x, cy, state_parameters, transition_parameters, transitions, dstate_gradient, dtransition_gradient)
+        ll0 = ll(x, cy, state_parameters, transition_parameters, transitions, dstate_gradient, dtransition_gradient)
         dtp0 = copy(dtransition_gradient)
-        ll1 = HCRF.log_likelihood(x, cy, state_parameters, transition_parameters + tpd, transitions, dstate_gradient, dtransition_gradient)
+        ll1 = ll(x, cy, state_parameters, transition_parameters + tpd, transitions, dstate_gradient, dtransition_gradient)
         expected_der = (ll1 - ll0) / delta
         actual_der = dtp0[trans]
 
