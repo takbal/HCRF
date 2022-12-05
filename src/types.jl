@@ -32,6 +32,7 @@ struct ObjectiveFunc{T <: AbstractArray}
     forward_tables::Vector{Array{Float64,3}}
     transition_tables::Vector{Array{Float64,4}}
     backward_tables::Vector{Array{Float64,3}}
+    log_likelihood::Vector{Float64}
 
     function ObjectiveFunc(model, X, y, features)
 
@@ -68,7 +69,7 @@ struct ObjectiveFunc{T <: AbstractArray}
         end
     
         new{typeof(features)}(model, X, y, features, state_gradients, transition_gradients,
-                   forward_tables, transition_tables, backward_tables)
+                   forward_tables, transition_tables, backward_tables, zeros(length(X)))
     
     end
 

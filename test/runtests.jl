@@ -30,20 +30,21 @@ function gen_transitions()
 end
 
 function get_x_dot_parameters(x, state_parameters)
-    n_states, n_classes, n_features = size(state_parameters)
-    return reshape(reshape(state_parameters, :, n_features) * x, n_states, n_classes, size(x,2))
+    n_features = size(state_parameters,3)
+    # return reshape(reshape(state_parameters, :, n_features) * x, n_states, n_classes, size(x,2))
+    return reshape(state_parameters, :, n_features) * x
 end
 
-function forward_backward(x_dot_parameters, transition_parameters, transitions)
+function forward_backward(x_dot_parameters, transition_parameters, transitions, n_states, n_classes)
 
-    (n_states, n_classes, n_time_steps) = size(x_dot_parameters)
+    n_time_steps = size(x_dot_parameters,2)
 
     forward_table = Array{Float64}(undef, n_time_steps + 1, n_states, n_classes)
     transition_table = Array{Float64}(undef, n_time_steps, n_states, n_states, n_classes)
     backward_table = Array{Float64}(undef, n_time_steps + 1, n_states, n_classes)
 
-    HCRF.forward!(forward_table, transition_table, x_dot_parameters, transition_parameters, transitions; need_transition_table = true)
-    HCRF.backward!(backward_table, x_dot_parameters, transition_parameters, transitions)
+    HCRF.forward!(forward_table, transition_table, x_dot_parameters, 1:size(x_dot_parameters,2), transition_parameters, transitions; need_transition_table = true)
+    HCRF.backward!(backward_table, x_dot_parameters, 1:size(x_dot_parameters,2), transition_parameters, transitions)
 
     return forward_table, transition_table, backward_table
 
@@ -51,10 +52,12 @@ end
 
 function ll(x, y, state_parameters, transition_parameters, transitions, state_gradient, transition_gradient)
 
-    forward_table, transition_table, backward_table = forward_backward(
-        get_x_dot_parameters(x, state_parameters), transition_parameters, transitions)
+    n_states, n_classes, _ = size(state_parameters)
 
-    return HCRF.log_likelihood!(state_gradient, transition_gradient, x, y, transitions,
+    forward_table, transition_table, backward_table = forward_backward(
+        get_x_dot_parameters(x, state_parameters), transition_parameters, transitions, n_states, n_classes)
+
+    return HCRF.log_likelihood!(state_gradient, transition_gradient, x, 1:size(x,2), y, transitions,
         forward_table, transition_table, backward_table)
 
 end
@@ -148,7 +151,7 @@ end
     n_classes = 2
 
     forward_table, _, backward_table = forward_backward(
-        get_x_dot_parameters(x, state_parameters), transition_parameters, transitions)
+        get_x_dot_parameters(x, state_parameters), transition_parameters, transitions, n_states, n_classes)
 
     @test forward_table ≈ expected_forward_table atol=0.0001
     @test forward_table[end,end,1] ≈ backward_table[1,1,1] atol=0.0001

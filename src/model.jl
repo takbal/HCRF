@@ -91,23 +91,13 @@ function fit!(X::AbstractVector{<:AbstractArray}, y::AbstractVector;
         for i in eachindex(X)[2:end]
             @assert size(X[i],1) == num_features "sample $i differ in feature size (was $(size(X[i],1)) while first had $num_features)"
         end
+        # convert X into features table
+        X, features = convert_features(X)
     else
         for i in eachindex(X)
             @assert maximum(X[i]) <= size(features,2) "too large index at sample $i"
             @assert minimum(X[i]) >= 1 "too small index at sample $i"
         end
-    end
-
-    # convert X into features table
-    if isnothing(features)
-        X_temp = Vector{Vector{Int64}}()
-        startidx = 1
-        for idx in eachindex(X)
-            push!(X_temp, startidx:(startidx + size(X[idx],2) - 1) )
-            startidx = startidx + size(X[idx],2)
-        end
-        features = hcat(X...)
-        X = X_temp
     end
 
     # process labels
@@ -289,32 +279,31 @@ function predict_marginals(m::HCRFModel, X::AbstractVector{<:AbstractArray}; fea
         for i in eachindex(X)
             @assert size(X[i],1) == n_features "sample $i differ in feature size (was $(size(X[i],1)) while it was $n_features at learning)"
         end
+
+        # convert X into features table
+        X, features = convert_features(X)
+
     else
         @assert size(features, 1) == n_features "features differ in size ($(size(features,1)) while it was $n_features at learning)"
         for i in eachindex(X)
             @assert maximum(X[i]) <= size(features,2) "too large feature index at sample $i"
             @assert minimum(X[i]) >= 1 "too small index at sample $i"
         end
-
-        # create cache
-        obs_dot_parameters = reshape(m.state_parameters, :, n_features) * features
     end
 
+    # create cache
+    feat_dot_parameters = reshape(m.state_parameters, :, n_features) * features
+
     for x in X
-        if isnothing(features)
-            x_dot_parameters = reshape(reshape(m.state_parameters, :, n_features) * x,  n_states, n_classes, :)
-        else
-            x_dot_parameters = reshape(view(obs_dot_parameters, :, x), n_states, n_classes, :)
-        end
-        n_time_steps = size(x_dot_parameters, 3)
+        n_time_steps = length(x)
 
         forward_table = Array{Float64}(undef, n_time_steps + 1, n_states, n_classes)
         if calc_hidden
             transition_table = Array{Float64}(undef, n_time_steps, n_states, n_states, n_classes)
-            forward!(forward_table, transition_table, x_dot_parameters,
+            forward!(forward_table, transition_table, feat_dot_parameters, x,
                      m.transition_parameters, m.transitions; need_transition_table = true)
         else        
-            forward!(forward_table, nothing, x_dot_parameters,
+            forward!(forward_table, nothing, feat_dot_parameters, x,
                      m.transition_parameters, m.transitions; need_transition_table = false)
         end
         
@@ -337,4 +326,15 @@ function predict_marginals(m::HCRFModel, X::AbstractVector{<:AbstractArray}; fea
         end
     end
     return y, hidden_states
+end
+
+function convert_features(X)
+    out = Vector{Vector{Int64}}()
+    startidx = 1
+    for idx in eachindex(X)
+        push!(out, startidx:(startidx + size(X[idx],2) - 1) )
+        startidx = startidx + size(X[idx],2)
+    end
+    features = hcat(X...)
+    return out, features
 end

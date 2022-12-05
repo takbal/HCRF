@@ -1,40 +1,28 @@
 # evaluate the objective function (called by Optim.jl)
 function (obj::ObjectiveFunc)(_, G, parameters::Vector{Float64})
 
-    negll_total = 0.0
-
     if !isnothing(G)
         fill!(G, 0)
     end
 
-    n_states, n_classes, n_features = obj.model.state_parameters_shape
+    n_features = obj.model.state_parameters_shape[3]
 
     state_parameters = reshape( view(parameters, 1:obj.model.state_parameters_count), obj.model.state_parameters_shape )
     transition_parameters = view(parameters, obj.model.state_parameters_count+1:(obj.model.state_parameters_count + length(obj.model.transitions) ) )
 
-    feat_dot_parameters = reshape(state_parameters, :, n_features) * obj.features
+    feat_dot_parameters = reshape(state_parameters, :, n_features) * obj.features # (states * classes) x time_steps matrix
 
-    for (idx, sample, class) in zip(1:length(obj.X), obj.X, obj.y)
+    Threads.@threads for idx in eachindex(obj.X)
 
-        n_time_steps = length(sample)
-
-        # rowvals() does not work on a sparse view with arbitrary cols, hence the copy
-        # x = copy(view(obj.features, :, sample))
-        x = obj.features[:, sample]
-
-        # x_dot_parameters = copy( reshape( view(feat_dotparameters, :, sample), n_states, n_classes, n_time_steps))
-        # x_dot_parameters = reshape( view(feat_dot_parameters, :, sample), n_states, n_classes, n_time_steps)
-        x_dot_parameters = reshape( feat_dot_parameters[:, sample], n_states, n_classes, n_time_steps)
-
-        forward!(obj.forward_tables[idx], obj.transition_tables[idx], x_dot_parameters,
+        forward!(obj.forward_tables[idx], obj.transition_tables[idx], feat_dot_parameters, obj.X[idx], 
                  transition_parameters, obj.model.transitions; need_transition_table = true)
 
-        backward!(obj.backward_tables[idx], x_dot_parameters,
+        backward!(obj.backward_tables[idx], feat_dot_parameters, obj.X[idx], 
                   transition_parameters, obj.model.transitions)
 
-        negll_total -= log_likelihood!(obj.state_gradients[idx],
+        obj.log_likelihood[idx] = log_likelihood!(obj.state_gradients[idx],
                                        obj.transition_gradients[idx],
-                                       x, class,
+                                       obj.features, obj.X[idx], obj.y[idx],
                                        obj.model.transitions,
                                        obj.forward_tables[idx],
                                        obj.transition_tables[idx],
@@ -42,9 +30,14 @@ function (obj::ObjectiveFunc)(_, G, parameters::Vector{Float64})
                    
     end
 
+    negll_total = 0.0
+    for idx in eachindex(obj.X)
+        negll_total -= obj.log_likelihood[idx]
+    end
+
     # deduce vectorised gradients
     if !isnothing(G)
-        for idx in 1:length(obj.X)
+        for idx in eachindex(obj.X)
             for i in eachindex(obj.state_gradients[idx])
                 G[i] -= obj.state_gradients[idx][i]
             end
@@ -93,9 +86,10 @@ function regularize_L2(ll, gradient, c2, parameters)
     return ll
 end
 
-function forward!(forward_table, transition_table, x_dot_parameters, transition_parameters, transitions; need_transition_table::Bool)
+function forward!(forward_table, transition_table, feat_dot_parameters, sample, transition_parameters, transitions; need_transition_table::Bool)
 
-    n_time_steps = size(x_dot_parameters, 3)
+    n_states = size(forward_table, 2)
+    n_time_steps = length(sample)
 
     fill!(forward_table, -Inf)
     forward_table[1, 1, :] .= 0
@@ -109,7 +103,8 @@ function forward!(forward_table, transition_table, x_dot_parameters, transition_
         s0 = tr[2]
         s1 = tr[3]
         # ft[t, s1] += ft[t-1, s0] * ψ(x_t, s1) * ψ(s0, s1) # ft is +1 length
-        edge_potential = forward_table[t, s0, class] + transition_parameters[tridx] + x_dot_parameters[s1, class, t]
+        # the end term is xdp[s1,class,t] where xdp:=reshape(feat_dot_parameters[:, sample],n_states,n_classes,n_time_steps) but this avoids copying
+        edge_potential = forward_table[t, s0, class] + transition_parameters[tridx] + feat_dot_parameters[s1 + (class-1)*n_states, sample[t]]
         forward_table[t+1, s1, class] =
             logaddexp( forward_table[t+1, s1, class], edge_potential )
         if need_transition_table
@@ -121,31 +116,32 @@ function forward!(forward_table, transition_table, x_dot_parameters, transition_
 
 end
 
-function backward!(backward_table, x_dot_parameters, transition_parameters, transitions)
+function backward!(backward_table, feat_dot_parameters, sample, transition_parameters, transitions)
 
-    n_states = size(x_dot_parameters, 1)
-    n_time_steps = size(x_dot_parameters, 3)
+    n_states = size(backward_table, 2)
+    n_time_steps = length(sample)
 
     fill!(backward_table, -Inf)
-    backward_table[n_time_steps + 1, n_states, :] .= 0
+    backward_table[end, end, :] .= 0
 
     @inbounds for t in n_time_steps:-1:1, (tridx, tr) in enumerate(transitions)
         class = tr[1]
         s0 = tr[2]
         s1 = tr[3]
         # bt[t-1, s0] += bt[t, s1] * ψ(x_t, s1) * ψ(s0, s1) # bt is +1 length
-        edge_potential = backward_table[t + 1, s1, class] + x_dot_parameters[s1, class, t] + transition_parameters[tridx]
+        # the end term is xdp[s1,class,t] where xdp:=reshape(feat_dot_parameters[:, sample],n_states,n_classes,n_time_steps) but this avoids copying
+        edge_potential = backward_table[t + 1, s1, class] + transition_parameters[tridx] + feat_dot_parameters[s1 + (class-1)*n_states, sample[t]]
         backward_table[t, s0, class] =
             logaddexp( backward_table[t, s0, class], edge_potential )
     end
 
 end
 
-function log_likelihood!(state_gradient, transition_gradient, x, cy, transitions, 
+function log_likelihood!(state_gradient, transition_gradient, features, sample, cy, transitions, 
     forward_table, transition_table, backward_table)
 
     n_states, n_classes, n_features = size(state_gradient)
-    n_time_steps = size(x, 2)
+    n_time_steps = length(sample)
 
     # reset parameter gradients buffers
     fill!(state_gradient, 0)
@@ -157,9 +153,9 @@ function log_likelihood!(state_gradient, transition_gradient, x, cy, transitions
         Z = logaddexp(Z, forward_table[n_time_steps+1, n_states, c])
     end
 
-    if issparse(x)
-        x_rows = rowvals(x)
-        x_vals = nonzeros(x)
+    if issparse(features)
+        x_rows = rowvals(features)
+        x_vals = nonzeros(features)
     end
 
     # compute all state parameter gradients
@@ -169,12 +165,12 @@ function log_likelihood!(state_gradient, transition_gradient, x, cy, transitions
         if c == cy
             weight += exp(alphabeta - forward_table[n_time_steps+1, n_states, c])
         end
-        if !issparse(x)
+        if !issparse(features)
             for feat in 1:n_features
-                state_gradient[state, c, feat] += weight * x[feat, t]
+                state_gradient[state, c, feat] += weight * features[feat, sample[t]]
             end
         else
-            for i in nzrange(x, t)
+            for i in nzrange(features, sample[t])
                 state_gradient[state, c, x_rows[i]] += weight * x_vals[i]
             end
         end
