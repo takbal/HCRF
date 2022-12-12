@@ -1,5 +1,5 @@
 """
-    fit!( X::AbstractVector{<:AbstractArray}, y::AbstractVector;
+    fit( X::AbstractVector{<:AbstractArray}, y::AbstractVector;
         features = nothing,
         num_states::UInt = 3,
         L1_penalty::Float64 = 0.,
@@ -9,6 +9,8 @@
         transition_parameter_noise = 0.001,
         use_L1_clipping = false,
         suppress_warning = false,
+        callback = nothing,
+        one_task_per_sample = false,
         optimize_parameters...)
 
 Fits a HCRF model to the provided features in `X` and observed classes in `y`. Length of `X` and `y` must match. `y` may
@@ -39,6 +41,7 @@ observation. This can speed-up computations if the samples contain overlapping s
 
 # Further arguments:
 
+- `model`: if nothing, generate new model, otherwise use this model for a start. Only the penalty parameters can be changed.
 - `num_states`: number of hidden states, *including* the obligatory start and end states
 - `L1_penalty`: L1 penalty multiplier (set to 0 to turn off L1 regularization)
 - `L2_penalty`: L2 penalty multiplier (set to 0 to turn off L2 regularization)
@@ -48,22 +51,29 @@ observation. This can speed-up computations if the samples contain overlapping s
                 Each of these transitions is going to have a weight that can be tuned.
                 If not specified, the `unconstrained_transitions()` function is used, that allows arbitrary changes.
                 See also `step_transitions()` for another example generator.
-
 - `state_parameter_noise`, `transition_parameter_noise`: variance for weight initialisation noise
-
 - `use_L1_clipping`: if true, use clipping of weights in L1 regularisation (gradient-wise dubious)
+- `suppress_warning`: if true, do not print warning messages (e.g. about failed convergence)
+- `callback`: a function name or nothing. If specified, call this function at each trace (set frequency by show_every).
+              This works the same as Optim.optimize() callbacks, except for it does not only get an Optim.OptimizationState,
+              but also the model's actual state as the second parameter. This enables running tests with the actual model during
+              optimization, and stop by returning true from the callback. If this is set, extended_trace should be set to true
+              for this to work (which is done automatically unless overwritten), and the LBFGS method should be used.
+- `one_task_per_sample` : if true, use one task for each sample instead splitting up samples between tasks when multi-threading.
+        This seems to be a bit faster for smaller problems, as it allows collecting results earlier, but uses more memory
+        allocations and GC. Benchmark which one is better for your use case.
 
-- `suppress_warning`: if true, do not print warning message about failed convergence
-
-Any further arguments not listed above will be passed to the `Optim.optimize()` call. If none such, `LBFGS()` is used.
+Any further arguments not listed above will be passed to the `Optim.optimize()` call (except for `callback` that is
+modified as described above). If none such, `method = LBFGS()` is used.
 
 # Returns:
 
 The fitted model and the optimization result. It may be partial if convergence is not achieved, when @warn is given.
 
 """
-function fit!(X::AbstractVector{<:AbstractArray}, y::AbstractVector;
+function fit(X::AbstractVector{<:AbstractArray}, y::AbstractVector;
               features = nothing,
+              model = nothing,
               num_states::Int = 3,
               L1_penalty::Float64 = 0.,
               L2_penalty::Float64 = 0.15,
@@ -72,6 +82,8 @@ function fit!(X::AbstractVector{<:AbstractArray}, y::AbstractVector;
               transition_parameter_noise = 0.001,
               use_L1_clipping = false,
               suppress_warning = false,
+              callback = nothing,
+              one_task_per_sample = false,
               optimize_parameters...)
 
     if isempty(optimize_parameters)
@@ -116,39 +128,85 @@ function fit!(X::AbstractVector{<:AbstractArray}, y::AbstractVector;
         push!(indexed_transitions, [ classes_map[transitions[t][1]], transitions[t][2], transitions[t][3] ] )
     end
 
-    num_transitions = length(indexed_transitions)
-    state_parameters_shape = (num_states, num_classes, num_features)
-    state_parameters_count = prod(state_parameters_shape)
+    if isnothing(model)
 
-    parameters = zeros(state_parameters_count + num_transitions)
+        num_transitions = length(indexed_transitions)
+        state_parameters_shape = (num_states, num_classes, num_features)
+        state_parameters_count = prod(state_parameters_shape)
 
-    # views
-    state_parameters = reshape( view(parameters, 1:state_parameters_count), state_parameters_shape )
-    transition_parameters = view(parameters, state_parameters_count+1:(state_parameters_count + num_transitions) )
+        parameters = zeros(state_parameters_count + num_transitions)
 
-    # random initialization of parameters
-    s = randn(state_parameters_shape) * state_parameter_noise
-    copyto!(state_parameters, s)
-    t = randn( size(transition_parameters) ) * transition_parameter_noise
-    copyto!(transition_parameters, t)
+        # views
+        state_parameters = reshape( view(parameters, 1:state_parameters_count), state_parameters_shape )
+        transition_parameters = view(parameters, state_parameters_count+1:(state_parameters_count + num_transitions) )
 
-    m = HCRFModel(num_states, L1_penalty, L2_penalty, use_L1_clipping, state_parameter_noise, transition_parameter_noise,
-              indexed_transitions, state_parameters_shape, state_parameters_count, parameters,
-              state_parameters, transition_parameters, classes, classes_map)
+        # random initialization of parameters
+        s = randn(state_parameters_shape) * state_parameter_noise
+        copyto!(state_parameters, s)
+        t = randn( size(transition_parameters) ) * transition_parameter_noise
+        copyto!(transition_parameters, t)
+
+        m = HCRFModel(num_states, L1_penalty, L2_penalty, use_L1_clipping, state_parameter_noise, transition_parameter_noise,
+                indexed_transitions, state_parameters_shape, state_parameters_count, parameters,
+                state_parameters, transition_parameters, classes, classes_map)
+
+    else
+        m = deepcopy(model)
+
+        # views
+        m.state_parameters = reshape( view(m.parameters, 1:m.state_parameters_count), m.state_parameters_shape )
+        m.transition_parameters = view(m.parameters, m.state_parameters_count+1:(m.state_parameters_count + length(m.transitions)) )
+
+        if !suppress_warning && num_states != m.state_parameters_shape[1]
+            @warn "specified number of states is different to the model, ignoring"
+        end
+        @assert m.classes_map == classes_map "classes are different in the model"
+        @assert m.state_parameters_shape[3] == num_features "number of features is different in the model"
+        if !suppress_warning && indexed_transitions != m.transitions
+            @warn "specified transitions are different to the model, ignoring"
+        end
+        if !suppress_warning && L1_penalty != m.L1_penalty
+            @warn "changing L1_penalty to $(L1_penalty) from $(m.L1_penalty)"
+            m.L1_penalty = L1_penalty
+        end
+        if !suppress_warning && L2_penalty != m.L2_penalty
+            @warn "changing L2_penalty to $(L2_penalty) from $(m.L2_penalty)"
+            m.L2_penalty = L2_penalty
+        end
+        if !suppress_warning && use_L1_clipping != m.use_L1_clipping
+            @warn "changing use_L1_clipping to $(use_L1_clipping) from $(m.use_L1_clipping)"
+            m.use_L1_clipping = use_L1_clipping
+        end
+            
+    end
 
     # function object closure
-    obj = ObjectiveFunc(m, X, y_indexed, features)
+    obj = ObjectiveFunc(m, X, y_indexed, features, one_task_per_sample)
 
-    result = optimize( Optim.only_fg!(obj), m.parameters; optimize_parameters...)
+    if !isnothing(callback)
+        extended_trace = true
+        cb = optstate -> hcrf_callback(optstate; model=m, cb=callback)
+    else
+        extended_trace = false
+        cb = nothing    
+    end
+
+    result = optimize( Optim.only_fg!(obj), m.parameters; extended_trace, callback=cb, optimize_parameters...)
 
     copyto!( m.parameters, Optim.minimizer(result) )    
 
     if !suppress_warning && !Optim.converged(result)
-        @warn "HCRF.fit!() failed to converge"
+        @warn "HCRF.fit() failed to converge"
     end
 
     return m, result
 
+end
+
+function hcrf_callback(optstate; model, cb)
+    @assert "x" in keys(optstate.metadata) "you need method=LBFGS() and extended_trace=true for this to work"
+    copyto!( model.parameters, optstate.metadata["x"] )
+    return cb(optstate, model)
 end
 
 """
@@ -222,7 +280,7 @@ end
 
 Predict the class by the fitted model in `m` for each sample in `X`.
 
-If `features` is provided, `X` is assumed to contain list of row indices into this matrix (see `fit!()`).
+If `features` is provided, `X` is assumed to contain list of row indices into this matrix (see `HCRF.fit()`).
 
 Samples must have the same number of features as the samples used for training.
 
@@ -246,7 +304,7 @@ the most probable hidden state sequence.
 # Arguments:
 
 - `m`: the fitted model
-- `X`, `features`: samples to predict labels for (see `fit!()`).
+- `X`, `features`: samples to predict labels for (see `HCRF.fit()`).
 - `calc_hidden`: if true, calculate and return the most likely hidden state sequence in the second return value.
 
 # Returns:

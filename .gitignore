@@ -16,3 +16,4 @@ Manifest.toml.sysimage
 Project.toml.sysimage
 using.txt
 compiled.txt
+benchmark/data_evenlarger.jld2

@@ -68,7 +68,13 @@ end
 
     X, y = gen_data()
 
-    model, result = HCRF.fit!(X, y, num_states = 3; L1_penalty = 0.15, transition_generator = step_transitions)
+    model, result = HCRF.fit(X, y; num_states = 3, L1_penalty = 0.15, transition_generator = step_transitions)
+
+    @test isequal( predict(model, X), y)
+
+    # test using model as start
+    model.parameters .= 0
+    model, result = HCRF.fit(X, y; num_states = 3, L1_penalty = 0.15, transition_generator = step_transitions, model)
 
     @test isequal( predict(model, X), y)
 end
@@ -81,7 +87,7 @@ end
     features = hcat(X...)
     X = [ [1;2;3], [4;5], [6], [7;8;9;10] ]
 
-    model, result = HCRF.fit!(X, y; features, num_states = 3)
+    model, result = HCRF.fit(X, y; features, num_states = 3)
 
     @test isequal( predict(model, X; features), y)
 
@@ -104,7 +110,7 @@ end
 
     y = [ 1, 1, 0, 1 ]
 
-    model, result = HCRF.fit!(X, y, num_states = 5, L1_penalty = 0., L2_penalty = 1. )
+    model, result = HCRF.fit(X, y; num_states = 5, L1_penalty = 0., L2_penalty = 1. )
     actual = predict(model, X)
 
     @test isequal( predict(model, X), y)

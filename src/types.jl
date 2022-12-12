@@ -22,54 +22,52 @@ mutable struct HCRFModel
     classes_map::Dict
 end
 
+mutable struct Sample
+    x::Vector{Int64}
+    y::Int64
+    state_gradient::Array{Float64,3}
+    transition_gradient::Vector{Float64}
+    forward_table::Array{Float64,3}
+    transition_table::Array{Float64,4}
+    backward_table::Array{Float64,3}
+    log_likelihood::Float64
+end
+
 struct ObjectiveFunc{T <: AbstractArray}
     model::HCRFModel
-    X::Vector{Vector{Int64}}
-    y::Vector{Int64}
     features::T
-    state_gradients::Vector{Array{Float64,3}}
-    transition_gradients::Vector{Vector{Float64}}
-    forward_tables::Vector{Array{Float64,3}}
-    transition_tables::Vector{Array{Float64,4}}
-    backward_tables::Vector{Array{Float64,3}}
-    log_likelihood::Vector{Float64}
+    samples::Vector{Sample}
+    tasks::Vector{Task}
+    one_task_per_sample::Bool
 
-    function ObjectiveFunc(model, X, y, features)
-
-        gradients = []
-        state_gradients = []
-        transition_gradients = []
-    
-        forward_tables = []
-        transition_tables = []
-        backward_tables = Array{Float64,3}[]
+    function ObjectiveFunc(model, X, y, features, one_task_per_sample)
 
         n_states, n_classes, _ = model.state_parameters_shape
-        
-        # pre-allocate target gradient and transition tables for each sample
+    
+        samples = []
 
-        for i in eachindex(X)
+        for (idx, x) in enumerate(X)
 
             if isnothing(features)
-                n_time_steps = size(X[i], 2)
+                n_time_steps = size(x, 2)
             else
-                n_time_steps = length(X[i])
+                n_time_steps = length(x)
             end
 
-            state_gradient = Array{Float64}(undef, model.state_parameters_shape)
-            transition_gradient = Vector{Float64}(undef, length(model.transitions) )
-    
-            push!(state_gradients, state_gradient)
-            push!(transition_gradients, transition_gradient)
+            push!( samples, Sample(
+                x, y[idx],
+                Array{Float64}(undef, model.state_parameters_shape),
+                Vector{Float64}(undef, length(model.transitions) ),
+                Array{Float64}(undef, n_time_steps + 1, n_states, n_classes),
+                Array{Float64}(undef, n_time_steps, n_states, n_states, n_classes),
+                Array{Float64}(undef, n_time_steps + 1, n_states, n_classes),
+                0
+            ) )
 
-            # Add extra 1 time step for start state
-            push!(forward_tables, Array{Float64}(undef, n_time_steps + 1, n_states, n_classes))
-            push!(transition_tables, Array{Float64}(undef, n_time_steps, n_states, n_states, n_classes))
-            push!(backward_tables, Array{Float64}(undef, n_time_steps + 1, n_states, n_classes))
         end
     
-        new{typeof(features)}(model, X, y, features, state_gradients, transition_gradients,
-                   forward_tables, transition_tables, backward_tables, zeros(length(X)))
+        new{typeof(features)}(model, features, samples,
+                    Vector{Task}(undef, length(samples)), one_task_per_sample)
     
     end
 

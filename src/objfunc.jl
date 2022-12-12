@@ -12,37 +12,33 @@ function (obj::ObjectiveFunc)(_, G, parameters::Vector{Float64})
 
     feat_dot_parameters = reshape(state_parameters, :, n_features) * obj.features # (states * classes) x time_steps matrix
 
-    Threads.@threads for idx in eachindex(obj.X)
-
-        forward!(obj.forward_tables[idx], obj.transition_tables[idx], feat_dot_parameters, obj.X[idx], 
-                 transition_parameters, obj.model.transitions; need_transition_table = true)
-
-        backward!(obj.backward_tables[idx], feat_dot_parameters, obj.X[idx], 
-                  transition_parameters, obj.model.transitions)
-
-        obj.log_likelihood[idx] = log_likelihood!(obj.state_gradients[idx],
-                                       obj.transition_gradients[idx],
-                                       obj.features, obj.X[idx], obj.y[idx],
-                                       obj.model.transitions,
-                                       obj.forward_tables[idx],
-                                       obj.transition_tables[idx],
-                                       obj.backward_tables[idx])
-                   
+    if obj.one_task_per_sample
+        # allocates more and seems to run a bit slower for large problems
+        for (idx,sample) in enumerate(obj.samples)
+            obj.tasks[idx] = Threads.@spawn calc_ll_gradient(sample, obj, feat_dot_parameters, transition_parameters)
+        end
+    else
+        # allocates less, but seems to run a bit slower for small problems
+            Threads.@threads for sample in obj.samples
+            calc_ll_gradient(sample, obj, feat_dot_parameters, transition_parameters)
+        end
     end
 
+    # collect results
     negll_total = 0.0
-    for idx in eachindex(obj.X)
-        negll_total -= obj.log_likelihood[idx]
-    end
-
-    # deduce vectorised gradients
-    if !isnothing(G)
-        for idx in eachindex(obj.X)
-            for i in eachindex(obj.state_gradients[idx])
-                G[i] -= obj.state_gradients[idx][i]
+    for (idx, sample) in enumerate(obj.samples)
+        if obj.one_task_per_sample
+            # allow early advance
+            wait(obj.tasks[idx])
+        end
+        negll_total -= sample.log_likelihood        
+        if !isnothing(G)
+            # deduce vectorised gradients
+            for i in eachindex(sample.state_gradient)
+                G[i] -= sample.state_gradient[i]
             end
-            for i in eachindex(obj.transition_gradients[idx])
-                G[obj.model.state_parameters_count + i] -= obj.transition_gradients[idx][i]
+            for i in eachindex(sample.transition_gradient)
+                G[obj.model.state_parameters_count + i] -= sample.transition_gradient[i]
             end
         end
     end
@@ -62,8 +58,25 @@ function (obj::ObjectiveFunc)(_, G, parameters::Vector{Float64})
 
 end
 
+function calc_ll_gradient(sample, obj, feat_dot_parameters, transition_parameters)
+
+    forward!(sample.forward_table, sample.transition_table, feat_dot_parameters, sample.x, 
+    transition_parameters, obj.model.transitions; need_transition_table = true)
+
+    backward!(sample.backward_table, feat_dot_parameters, sample.x, 
+        transition_parameters, obj.model.transitions)
+
+    sample.log_likelihood = log_likelihood!(sample.state_gradient,
+                            sample.transition_gradient,
+                            obj.features, sample.x, sample.y,
+                            obj.model.transitions,
+                            sample.forward_table,
+                            sample.transition_table,
+                            sample.backward_table)
+end
+
 function regularize_L1(ll, gradient, c1, parameters, use_clipping::Bool)
-    # compared to Python, we have negative ll and gradient here
+    # we have negative ll and gradient here
     ll += c1 * sum(abs, parameters)
     if !isnothing(gradient)
         if use_clipping
@@ -78,7 +91,7 @@ function regularize_L1(ll, gradient, c1, parameters, use_clipping::Bool)
 end
 
 function regularize_L2(ll, gradient, c2, parameters)
-    # compared to Python, we have negative ll and gradient here
+    # we have negative ll and gradient here
     ll += c2 * sum(x-> x^2, parameters)
     if !isnothing(gradient)
         gradient .+= 2.0 * c2 * parameters
@@ -103,7 +116,7 @@ function forward!(forward_table, transition_table, feat_dot_parameters, sample, 
         s0 = tr[2]
         s1 = tr[3]
         # ft[t, s1] += ft[t-1, s0] * ψ(x_t, s1) * ψ(s0, s1) # ft is +1 length
-        # the end term is xdp[s1,class,t] where xdp:=reshape(feat_dot_parameters[:, sample],n_states,n_classes,n_time_steps) but this avoids copying
+        # the end term is xdp[s1,class,t] where xdp:=reshape(feat_dot_parameters[:, sample],n_states,n_classes,n_time_steps) - but this avoids copying
         edge_potential = forward_table[t, s0, class] + transition_parameters[tridx] + feat_dot_parameters[s1 + (class-1)*n_states, sample[t]]
         forward_table[t+1, s1, class] =
             logaddexp( forward_table[t+1, s1, class], edge_potential )
@@ -129,7 +142,7 @@ function backward!(backward_table, feat_dot_parameters, sample, transition_param
         s0 = tr[2]
         s1 = tr[3]
         # bt[t-1, s0] += bt[t, s1] * ψ(x_t, s1) * ψ(s0, s1) # bt is +1 length
-        # the end term is xdp[s1,class,t] where xdp:=reshape(feat_dot_parameters[:, sample],n_states,n_classes,n_time_steps) but this avoids copying
+        # the end term is xdp[s1,class,t] where xdp:=reshape(feat_dot_parameters[:, sample],n_states,n_classes,n_time_steps) - but this avoids copying
         edge_potential = backward_table[t + 1, s1, class] + transition_parameters[tridx] + feat_dot_parameters[s1 + (class-1)*n_states, sample[t]]
         backward_table[t, s0, class] =
             logaddexp( backward_table[t, s0, class], edge_potential )
@@ -143,7 +156,6 @@ function log_likelihood!(state_gradient, transition_gradient, features, sample, 
     n_states, n_classes, n_features = size(state_gradient)
     n_time_steps = length(sample)
 
-    # reset parameter gradients buffers
     fill!(state_gradient, 0)
     fill!(transition_gradient, 0)
 
@@ -158,7 +170,7 @@ function log_likelihood!(state_gradient, transition_gradient, features, sample, 
         x_vals = nonzeros(features)
     end
 
-    # compute all state parameter gradients
+    # state parameter gradient
     @inbounds for t in 1:n_time_steps, state in 1:n_states, c in 1:n_classes
         alphabeta = forward_table[t+1, state, c] + backward_table[t+1, state, c]
         weight = -exp(alphabeta - Z)
@@ -176,7 +188,7 @@ function log_likelihood!(state_gradient, transition_gradient, features, sample, 
         end
     end
 
-    # compute all transition parameter gradients
+    # transition gradient
     @inbounds for t in 1:n_time_steps, (tridx, tr) in enumerate(transitions)
         c = tr[1]
         s0 = tr[2]
