@@ -1,3 +1,5 @@
+#@linter_refs HCRF, load, JLD2
+
 using HCRF, BenchmarkTools, JLD2
 
 data = load(ARGS[1])
