@@ -21,13 +21,13 @@ The `X` vector stores observation sequences. Two formats are accepted:
 1. it can be a vector of arrays, where each array contains feature values in a `#features x #timesteps` matrix.
 (It is internally converted into the next format.)
 
-2. if the `features` argument is filled, X[i] is considered as a column index list into that table,
-and samples are formed from the columns of that table: `sample_features[i] = features[:, X[i]]`.
+2. if the `features` argument is filled, X[i] is considered as a #timesteps long column index list into that table,
+and sample matrices are formed from the columns of that table as: `sample_features[i] = features[:, X[i]]`.
 
 Matrices can be of arbitrary format, until they:
 
-1. can be horizontally concatenated into a matrix,
-2. after concatenation, they accept multiplication with a full double matrix, that result in a full double matrix,
+1. can be horizontally concatenated into another matrix,
+2. after concatenation, they accept multiplication with a full double matrix, that results in a full double matrix,
 3. can be indexed by columns.
 
 In particular, sparse feature matrices have a special, faster execution path.
@@ -59,9 +59,7 @@ observation. This can speed-up computations if the samples contain overlapping s
               but also the model's actual state as the second parameter. This enables running tests with the actual model during
               optimization, and stop by returning true from the callback. If this is set, extended_trace should be set to true
               for this to work (which is done automatically unless overwritten), and the LBFGS method should be used.
-- `one_task_per_sample` : if true, use one task for each sample instead splitting up samples between tasks when multi-threading.
-        This seems to be a bit faster for smaller problems, as it allows collecting results earlier, but uses more memory
-        allocations and GC. Benchmark which one is better for your use case.
+- `num_threads` : number of threads to use. Defaults to Threads.nthreads().
 
 Any further arguments not listed above will be passed to the `Optim.optimize()` call (except for `callback` that is
 modified as described above). If none such, `method = LBFGS()` is used.
@@ -83,7 +81,7 @@ function fit(X::AbstractVector{<:AbstractArray}, y::AbstractVector;
               use_L1_clipping = false,
               suppress_warning = false,
               callback = nothing,
-              one_task_per_sample = false,
+              num_threads::Int64 = Threads.nthreads(),
               optimize_parameters...)
 
     if isempty(optimize_parameters)
@@ -93,7 +91,7 @@ function fit(X::AbstractVector{<:AbstractArray}, y::AbstractVector;
     # sanity checks
     @assert num_states > 1 "num_states must be larger than 1 (init and end states are needed)"
     @assert length(X) == length(y) "samples and labels do not match in length"
-    @assert length(X) > 1 "no observation was provided"
+    @assert length(X) > 0 "no observation was provided"
     for i in eachindex(X)
         @assert all(size(X[i]) .> 0) "empty samples were provided at index $(i)"
     end
@@ -181,7 +179,7 @@ function fit(X::AbstractVector{<:AbstractArray}, y::AbstractVector;
     end
 
     # function object closure
-    obj = ObjectiveFunc(m, X, y_indexed, features, one_task_per_sample)
+    obj = ObjectiveFunc(m, X, y_indexed, features, num_threads)
 
     if !isnothing(callback)
         extended_trace = true

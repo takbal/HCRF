@@ -9,36 +9,24 @@ function (obj::ObjectiveFunc)(_, G, parameters::Vector{Float64})
 
     state_parameters = reshape( view(parameters, 1:obj.model.state_parameters_count), obj.model.state_parameters_shape )
     transition_parameters = view(parameters, obj.model.state_parameters_count+1:(obj.model.state_parameters_count + length(obj.model.transitions) ) )
-
     feat_dot_parameters = reshape(state_parameters, :, n_features) * obj.features # (states * classes) x time_steps matrix
 
-    if obj.one_task_per_sample
-        # allocates more and seems to run a bit slower for large problems
-        for (idx,sample) in enumerate(obj.samples)
-            obj.tasks[idx] = Threads.@spawn calc_ll_gradient(sample, obj, feat_dot_parameters, transition_parameters)
-        end
-    else
-        # allocates less, but seems to run a bit slower for small problems
-            Threads.@threads for sample in obj.samples
-            calc_ll_gradient(sample, obj, feat_dot_parameters, transition_parameters)
-        end
+    for thread in obj.threads
+        thread.task = Threads.@spawn calc_ll_gradient!(thread, obj, feat_dot_parameters, transition_parameters)
     end
 
-    # collect results
+    # collect results with early advance
     negll_total = 0.0
-    for (idx, sample) in enumerate(obj.samples)
-        if obj.one_task_per_sample
-            # allow early advance
-            wait(obj.tasks[idx])
-        end
-        negll_total -= sample.log_likelihood        
+    for thread in obj.threads
+        wait(thread.task)
+        negll_total -= thread.log_likelihood        
         if !isnothing(G)
             # deduce vectorised gradients
-            for i in eachindex(sample.state_gradient)
-                G[i] -= sample.state_gradient[i]
+            for i in eachindex(thread.state_gradient)
+                G[i] -= thread.state_gradient[i]
             end
-            for i in eachindex(sample.transition_gradient)
-                G[obj.model.state_parameters_count + i] -= sample.transition_gradient[i]
+            for i in eachindex(thread.transition_gradient)
+                G[obj.model.state_parameters_count + i] -= thread.transition_gradient[i]
             end
         end
     end
@@ -58,21 +46,29 @@ function (obj::ObjectiveFunc)(_, G, parameters::Vector{Float64})
 
 end
 
-function calc_ll_gradient(sample, obj, feat_dot_parameters, transition_parameters)
+function calc_ll_gradient!(thread, obj, feat_dot_parameters, transition_parameters)
 
-    forward!(sample.forward_table, sample.transition_table, feat_dot_parameters, sample.x, 
-    transition_parameters, obj.model.transitions; need_transition_table = true)
+    fill!(thread.state_gradient, 0)
+    fill!(thread.transition_gradient, 0)
+    thread.log_likelihood = 0.0
 
-    backward!(sample.backward_table, feat_dot_parameters, sample.x, 
-        transition_parameters, obj.model.transitions)
+    for (idx, x) in enumerate(thread.X)
 
-    sample.log_likelihood = log_likelihood!(sample.state_gradient,
-                            sample.transition_gradient,
-                            obj.features, sample.x, sample.y,
-                            obj.model.transitions,
-                            sample.forward_table,
-                            sample.transition_table,
-                            sample.backward_table)
+        forward!(thread.forward_table, thread.transition_table, feat_dot_parameters, x, 
+        transition_parameters, obj.model.transitions; need_transition_table = true)
+
+        backward!(thread.backward_table, feat_dot_parameters, x, 
+            transition_parameters, obj.model.transitions)
+
+        thread.log_likelihood += log_likelihood!(thread.state_gradient,
+                                    thread.transition_gradient,
+                                    obj.features, x, thread.y[idx],
+                                    obj.model.transitions,
+                                    thread.forward_table,
+                                    thread.transition_table,
+                                    thread.backward_table)
+    end
+
 end
 
 function regularize_L1(ll, gradient, c1, parameters, use_clipping::Bool)
@@ -101,14 +97,16 @@ end
 
 function forward!(forward_table, transition_table, feat_dot_parameters, sample, transition_parameters, transitions; need_transition_table::Bool)
 
-    n_states = size(forward_table, 2)
+    _, n_states, n_classes = size(forward_table)
     n_time_steps = length(sample)
 
-    fill!(forward_table, -Inf)
+    # careful: forward_table is pre-allocated per thread for the largest sample, and may contain garbage beyond n_time_steps+1
+    fill!( view(forward_table, 1:n_time_steps + 1, 1:n_states, 1:n_classes), -Inf)
     forward_table[1, 1, :] .= 0
 
     if need_transition_table
-        transition_table = fill!( transition_table, -Inf)
+        # careful: transition_table is pre-allocated per thread for the largest sample, and may contain garbage beyond n_time_steps
+        fill!( view(transition_table, 1:n_time_steps, 1:n_states, 1:n_states, 1:n_classes), -Inf)
     end
 
     @inbounds for t in 1:n_time_steps, (tridx, tr) in enumerate(transitions)
@@ -131,11 +129,12 @@ end
 
 function backward!(backward_table, feat_dot_parameters, sample, transition_parameters, transitions)
 
-    n_states = size(backward_table, 2)
+    _, n_states, n_classes = size(backward_table)
     n_time_steps = length(sample)
 
-    fill!(backward_table, -Inf)
-    backward_table[end, end, :] .= 0
+    # careful: forward_table is pre-allocated per thread for the largest sample, and may contain garbage beyond n_time_steps+1
+    fill!( view(backward_table, 1:n_time_steps+1, 1:n_states, 1:n_classes), -Inf)
+    backward_table[n_time_steps+1, end, :] .= 0
 
     @inbounds for t in n_time_steps:-1:1, (tridx, tr) in enumerate(transitions)
         class = tr[1]
@@ -155,9 +154,6 @@ function log_likelihood!(state_gradient, transition_gradient, features, sample, 
 
     n_states, n_classes, n_features = size(state_gradient)
     n_time_steps = length(sample)
-
-    fill!(state_gradient, 0)
-    fill!(transition_gradient, 0)
 
     # compute Z by rewinding the forward table for all classes
     Z = -Inf

@@ -54,6 +54,9 @@ function ll(x, y, state_parameters, transition_parameters, transitions, state_gr
 
     n_states, n_classes, _ = size(state_parameters)
 
+    fill!(state_gradient, 0)
+    fill!(transition_gradient, 0)
+
     forward_table, transition_table, backward_table = forward_backward(
         get_x_dot_parameters(x, state_parameters), transition_parameters, transitions, n_states, n_classes)
 
@@ -87,7 +90,7 @@ end
     features = hcat(X...)
     X = [ [1;2;3], [4;5], [6], [7;8;9;10] ]
 
-    model, result = HCRF.fit(X, y; features, num_states = 3)
+    model, result = HCRF.fit(X, y; features, num_states = 3, num_threads = 1)
 
     @test isequal( predict(model, X; features), y)
 

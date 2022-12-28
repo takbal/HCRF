@@ -22,9 +22,11 @@ mutable struct HCRFModel
     classes_map::Dict
 end
 
-mutable struct Sample
-    x::Vector{Int64}
-    y::Int64
+# accumulated values per thread
+mutable struct HCRFThread
+    task::Task
+    X::Vector{Vector{Int64}}
+    y::Vector{Int64}
     state_gradient::Array{Float64,3}
     transition_gradient::Vector{Float64}
     forward_table::Array{Float64,3}
@@ -36,38 +38,40 @@ end
 struct ObjectiveFunc{T <: AbstractArray}
     model::HCRFModel
     features::T
-    samples::Vector{Sample}
-    tasks::Vector{Task}
-    one_task_per_sample::Bool
+    threads::Vector{HCRFThread}
 
-    function ObjectiveFunc(model, X, y, features, one_task_per_sample)
+    function ObjectiveFunc(model, X, y, features, num_threads)
 
         n_states, n_classes, _ = model.state_parameters_shape
-    
-        samples = []
 
-        for (idx, x) in enumerate(X)
+        # to avoid excessive allocation of memory, we
+        # store only one instance of some temporary variables per thread.
+        # We need to determine the longest sample length to pre-allocate.
+        # Care should be taken however to use the forward/backward/transition
+        # tables up to the actual sample length only, as beyond they may contain
+        # garbage over subsequent samples.
 
-            if isnothing(features)
-                n_time_steps = size(x, 2)
-            else
-                n_time_steps = length(x)
-            end
+        max_time_steps = maximum( length.(X) )
 
-            push!( samples, Sample(
-                x, y[idx],
+        X_chunks = equal_partition(X, num_threads)
+        y_chunks = equal_partition(y, num_threads)
+
+        # use less threads if more than samples
+        num_threads = min(length(X_chunks), num_threads)
+
+        threads = HCRFThread[]
+        for t in 1:num_threads
+            push!( threads, HCRFThread( Task(""), 
+                copy(X_chunks[t]), copy(y_chunks[t]),
                 Array{Float64}(undef, model.state_parameters_shape),
                 Vector{Float64}(undef, length(model.transitions) ),
-                Array{Float64}(undef, n_time_steps + 1, n_states, n_classes),
-                Array{Float64}(undef, n_time_steps, n_states, n_states, n_classes),
-                Array{Float64}(undef, n_time_steps + 1, n_states, n_classes),
-                0
-            ) )
-
-        end
+                Array{Float64}(undef, max_time_steps + 1, n_states, n_classes),
+                Array{Float64}(undef, max_time_steps, n_states, n_states, n_classes),
+                Array{Float64}(undef, max_time_steps + 1, n_states, n_classes),
+                0 ) )
+            end
     
-        new{typeof(features)}(model, features, samples,
-                    Vector{Task}(undef, length(samples)), one_task_per_sample)
+        new{typeof(features)}(model, features, threads)
     
     end
 
