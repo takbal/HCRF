@@ -326,7 +326,7 @@ function predict_marginals(m::HCRFModel, X::AbstractVector{<:AbstractArray}; fea
     end
 
     # sanity checks
-    @assert length(X) > 1 "no observation was provided"
+    @assert length(X) >= 1 "no observation was provided"
     for i in eachindex(X)
         @assert all(size(X[i]) .> 0) "empty sample was provided at index $(i)"
     end
