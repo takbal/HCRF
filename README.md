@@ -4,9 +4,10 @@ A pure Julia transcription of the hidden (state) conditional random field (__HCR
 
 - multi-threaded learning phase
 - option to calculate the most likely hidden state sequence
-- supports input and fast learning on overlapping sequences
+- supports input of and fast learning on overlapping sequences
 - added unconstrained transitions (now default)
-- optimised internal data representation
+- extended callback function to enable examining model state and performance during learning
+- optimised internal data representation for these changes
 
 ## Fixes
 
