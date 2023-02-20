@@ -51,8 +51,6 @@ struct ObjectiveFunc{T <: AbstractArray}
         # tables up to the actual sample length only, as beyond they may contain
         # garbage over subsequent samples.
 
-        max_time_steps = maximum( length.(X) )
-
         X_chunks = equal_partition(X, num_threads)
         y_chunks = equal_partition(y, num_threads)
 
@@ -61,6 +59,7 @@ struct ObjectiveFunc{T <: AbstractArray}
 
         threads = HCRFThread[]
         for t in 1:num_threads
+            max_time_steps = maximum( length.(X_chunks[t]) )
             push!( threads, HCRFThread( Task(""), 
                 copy(X_chunks[t]), copy(y_chunks[t]),
                 Array{Float64}(undef, model.state_parameters_shape),
