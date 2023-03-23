@@ -1,0 +1,27 @@
+[release]
+exclude = ["Revise", "Atom", "Juno", "MethodAnalysis", "JuliaInterpreter", "StaticLint", "PkgAuthentication", "CodeTools", "Traceur", "BenchmarkTools", "JET", "ProfileView", "Test"]
+
+[image]
+exclude = []
+
+[using]
+packages = ["Revise", "JuliaInterpreter", "BenchmarkTools", "Optim", "SparseArrays", "Random", "Test", "HCRF"]
+exclude = ["Atom"]
+
+[local_registry]
+name = "{user}"
+remote_git_server = "localhost"
+use = true
+
+[compiled]
+modules = ["Base", "Base.BaseDocs", "Base.BinaryPlatforms", "Base.BinaryPlatforms.CPUID", "Base.Broadcast", "Base.Cartesian", "Base.Checked", "Base.CoreLogging", "Base.Docs", "Base.Enums", "Base.Experimental", "Base.FastMath", "Base.Filesystem", "Base.GC", "Base.GMP", "Base.GMP.MPQ", "Base.GMP.MPZ", "Base.IRShow", "Core.Compiler", "Core.Compiler.CoreDocs", "Core.Compiler.EscapeAnalysis", "Core.Compiler.Iterators", "Core.Compiler.Order", "Core.Compiler.Sort", "Core.Compiler.Sort.Float", "Core.Compiler.Timings", "Base.Iterators", "Base.IteratorsMD", "Base.Libc", "Base.Libc.Libdl", "Base.MPFR", "Base.MainInclude", "Base.Math", "Base.MathConstants", "Base.Meta", "Base.Multimedia", "Base.MultiplicativeInverses", "Base.Order", "Base.PCRE", "Base.PermutedDimsArrays", "Base.Rounding", "Base.Ryu", "Base.SimdLoop", "Base.Sort", "Base.Sort.Float", "Base.StackTraces", "Base.Sys", "Base.TOML", "Base.Threads", "Base.Unicode", "Base._RepeatInnerOuter", "Base.__toplevel__"]
+exclude = []
+
+[image_commands]
+JLD2 = "load(\"{template_location}/../julia_image_data/jld2/compressed.jld2\") ; load(\"{template_location}/../julia_image_data/jld2/uncompressed.jld2\")"
+PlotlyJS = "display(plot([1]))"
+Optim = "f(x) = (1.0 - x[1])^2 + 100.0 * (x[2] - x[1]^2)^2 ; optimize(f, [0. 0.], LBFGS())"
+ArgParse = "s = ArgParseSettings(); add_arg_table!(s,[\"--o1\"],Dict(:help=>\"h\"),\"--o2\",Dict(:arg_type =>Int,:default=>0),\"--flag1\",Dict(:action=>:store_true),\"arg1\"); parse_args(s)"
+
+[gitlab]
+group = ""
